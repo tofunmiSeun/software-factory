@@ -1,0 +1,9 @@
+# Per-project factory state, worktrees and checkouts
+projects/*
+!projects/.gitkeep
+
+# Local Claude Code settings (per-machine command approvals)
+.claude/settings.local.json
+
+node_modules/
+.DS_Store

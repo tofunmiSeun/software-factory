@@ -1,0 +1,16 @@
+{
+  "name": "software-factory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A spec → plan → build → review → PR software factory orchestrated by Claude Code.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "factory": "node scripts/factory.mjs",
+    "status": "node scripts/factory.mjs status",
+    "dashboard": "node dashboard/server.mjs",
+    "test": "node --test test/factory.test.mjs test/dashboard.test.mjs"
+  }
+}

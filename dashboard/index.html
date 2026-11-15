@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Software Factory</title>
+<style>
+  :root {
+    --bg: #f4f3ef; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a65; --line: #e2e0d8;
+    --chip: #ecebe5; --accent: #e8590c; --accent-soft: #fff1e8;
+    --s-pending: #c9c7bf; --s-building: #2f6fdb; --s-reviewing: #7b4fd6; --s-pr_open: #d99a00;
+    --s-needs_human: #d63b3b; --s-merged: #2e9a5b; --s-closed: #8a8880;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141413; --panel: #1f1f1d; --ink: #ecebe6; --muted: #9a988f; --line: #33322e; --chip: #2a2a27; --accent-soft: #3a2414; --s-pending: #55534d; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+  header { display: flex; align-items: center; gap: 18px; padding: 14px 22px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; flex-wrap: wrap; }
+  .brand { font-weight: 700; letter-spacing: .02em; display: flex; align-items: center; gap: 10px; }
+  .brand::before { content: ""; width: 12px; height: 12px; background: var(--accent); border-radius: 2px; box-shadow: 5px 5px 0 var(--ink); }
+  select { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); }
+  .stats { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+  .stat { padding: 4px 10px; border-radius: 999px; background: var(--chip); font-size: 12px; color: var(--muted); }
+  .stat b { color: var(--ink); }
+  .stat.hot { background: var(--accent-soft); color: var(--accent); }
+  .stat.hot b { color: var(--accent); }
+  .updated { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+  .layout { display: grid; grid-template-columns: 1fr 300px; min-height: calc(100vh - 58px); }
+  main { overflow-x: auto; padding: 18px 22px; }
+  .board { display: grid; grid-template-columns: repeat(6, minmax(190px, 1fr)); gap: 12px; min-width: 1200px; }
+  .col h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; display: flex; justify-content: space-between; }
+  .col .list { display: flex; flex-direction: column; gap: 10px; min-height: 60px; padding: 6px; border-radius: 10px; background: color-mix(in srgb, var(--chip) 55%, transparent); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 11px 12px; cursor: pointer; transition: transform .08s, box-shadow .08s; }
+  .card:hover { transform: translateY(-1px); box-shadow: 0 3px 10px rgba(0,0,0,.08); }
+  .card.turn { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+  .card.selected { outline: 2px solid var(--ink); }
+  .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .chip { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--chip); color: var(--muted); }
+  .chip.turn { background: var(--accent); color: #fff; font-weight: 600; }
+  .title { font-weight: 600; margin: 6px 0 2px; }
+  .id { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .pips { display: flex; gap: 3px; margin: 9px 0 6px; }
+  .pip { flex: 1; height: 6px; border-radius: 3px; background: var(--s-pending); }
+  .next { font-size: 12px; color: var(--muted); }
+  a { color: inherit; }
+  .pr { font-family: var(--mono); font-size: 12px; }
+  aside.activity { border-left: 1px solid var(--line); background: var(--panel); padding: 16px; overflow-y: auto; max-height: calc(100vh - 58px); position: sticky; top: 58px; }
+  aside h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; }
+  .ev { padding: 7px 0; border-bottom: 1px dashed var(--line); font-size: 12.5px; }
+  .ev .t { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .ev .k { font-family: var(--mono); font-size: 11px; color: var(--accent); }
+  .empty { color: var(--muted); padding: 40px 0; text-align: center; }
+  .empty code { font-family: var(--mono); background: var(--chip); padding: 2px 6px; border-radius: 4px; }
+  /* drawer */
+  .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(760px, 96vw); background: var(--panel); border-left: 1px solid var(--line); box-shadow: -10px 0 30px rgba(0,0,0,.12); transform: translateX(105%); transition: transform .18s; z-index: 10; display: flex; flex-direction: column; }
+  .drawer.open { transform: none; }
+  .drawer header { position: static; }
+  .drawer .close { margin-left: auto; border: 0; background: var(--chip); color: var(--ink); border-radius: 6px; padding: 5px 10px; cursor: pointer; font: inherit; }
+  .drawer .body { overflow-y: auto; padding: 18px 22px 40px; }
+  .stages { width: 100%; border-collapse: collapse; margin: 6px 0 18px; font-size: 13px; }
+  .stages td, .stages th { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .stages th { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 12px; }
+  .tabs button { font: 12px var(--mono); border: 1px solid var(--line); background: var(--panel); color: var(--ink); padding: 4px 9px; border-radius: 6px; cursor: pointer; }
+  .tabs button.on { background: var(--ink); color: var(--panel); border-color: var(--ink); }
+  .doc { border: 1px solid var(--line); border-radius: 9px; padding: 4px 18px 12px; background: color-mix(in srgb, var(--chip) 30%, var(--panel)); }
+  .doc h1 { font-size: 20px; } .doc h2 { font-size: 16px; margin-top: 20px; } .doc h3 { font-size: 14px; }
+  .doc pre { background: var(--chip); padding: 10px; border-radius: 6px; overflow-x: auto; font: 12px/1.5 var(--mono); }
+  .doc code { font-family: var(--mono); font-size: 12.5px; background: var(--chip); padding: 1px 4px; border-radius: 4px; }
+  .doc pre code { background: none; padding: 0; }
+  .verdict-pass { color: var(--s-merged); font-weight: 700; } .verdict-fail { color: var(--s-needs_human); font-weight: 700; }
+  .hist { font-size: 12.5px; } .hist div { padding: 3px 0; }
+  .section { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 18px 0 6px; }
+  .callout { background: var(--accent-soft); color: var(--ink); border-left: 3px solid var(--accent); padding: 9px 12px; border-radius: 6px; font-size: 13px; margin: 10px 0; }
+  .callout code { font-family: var(--mono); }
+  @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } aside.activity { position: static; max-height: none; border-left: 0; border-top: 1px solid var(--line); } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">Software Factory</div>
+  <select id="project" aria-label="Project filter"><option value="">All projects</option></select>
+  <div class="stats" id="stats"></div>
+  <div class="updated" id="updated">connecting…</div>
+</header>
+<div class="layout">
+  <main><div id="board"></div></main>
+  <aside class="activity"><h3>Activity</h3><div id="events"></div></aside>
+</div>
+<div class="drawer" id="drawer" aria-hidden="true">
+  <header><div id="d-head" style="min-width:0"></div><button class="close" id="d-close">Close</button></header>
+  <div class="body" id="d-body"></div>
+</div>
+<script>
+const COLUMNS = [
+  { title: 'Spec', statuses: ['spec_drafting', 'awaiting_spec_approval'] },
+  { title: 'Plan', statuses: ['planning', 'awaiting_plan_approval'] },
+  { title: 'Build & review', statuses: ['building'] },
+  { title: 'Awaiting merge', statuses: ['awaiting_merge'] },
+  { title: 'Blocked', statuses: ['needs_human'] },
+  { title: 'Done', statuses: ['done', 'cancelled'] },
+];
+const STATUS_LABEL = {
+  spec_drafting: 'drafting spec', awaiting_spec_approval: 'spec ready for you', planning: 'planning',
+  awaiting_plan_approval: 'plan ready for you', building: 'building', awaiting_merge: 'PR open',
+  needs_human: 'needs you', done: 'done', cancelled: 'cancelled',
+};
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const safeUrl = (u) => /^https?:\/\//i.test(u) ? u : '#';
+const ago = (iso) => {
+  const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+  if (s < 60) return `${Math.floor(s)}s ago`; if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`; return new Date(iso).toLocaleDateString();
+};
+const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
+
+let data = null;
+let selected = null;   // { project, feature }
+let selectedDoc = null;
+let lastDocKey = '';
+$('project').value = store.get('sf.project') || '';
+
+function md(src) {
+  const lines = esc(src).split('\n');
+  const html = []; let inCode = false; let list = null; let para = [];
+  const inline = (t) => t
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, txt, url) => `<a href="${safeUrl(url.replace(/&amp;/g, '&'))}" target="_blank" rel="noopener">${txt}</a>`)
+    .replace(/^VERDICT: PASS/, '<span class="verdict-pass">VERDICT: PASS</span>')
+    .replace(/^VERDICT: FAIL/, '<span class="verdict-fail">VERDICT: FAIL</span>');
+  const flushPara = () => { if (para.length) { html.push(`<p>${inline(para.join(' '))}</p>`); para = []; } };
+  const flushList = () => { if (list) { html.push(`</${list}>`); list = null; } };
+  for (const line of lines) {
+    if (line.startsWith('```')) { flushPara(); flushList(); html.push(inCode ? '</code></pre>' : '<pre><code>'); inCode = !inCode; continue; }
+    if (inCode) { html.push(line + '\n'); continue; }
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    const li = line.match(/^\s*(?:[-*]|(\d+)\.)\s+(.*)$/);
+    if (h) { flushPara(); flushList(); html.push(`<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`); }
+    else if (li) { flushPara(); const tag = li[1] ? 'ol' : 'ul'; if (list !== tag) { flushList(); html.push(`<${tag}>`); list = tag; } html.push(`<li>${inline(li[2])}</li>`); }
+    else if (!line.trim()) { flushPara(); flushList(); }
+    else { flushList(); para.push(line); }
+  }
+  flushPara(); flushList(); if (inCode) html.push('</code></pre>');
+  return html.join('');
+}
+
+function allFeatures() {
+  const filter = $('project').value;
+  return (data?.projects || []).filter((p) => !filter || p.name === filter)
+    .flatMap((p) => p.features.map((f) => ({ ...f, project: p.name, projectInfo: p })));
+}
+
+function renderHeader() {
+  const sel = $('project'); const cur = sel.value;
+  const names = (data.projects || []).map((p) => p.name);
+  sel.innerHTML = '<option value="">All projects</option>' + names.map((n) => `<option ${n === cur ? 'selected' : ''}>${esc(n)}</option>`).join('');
+  if (cur && !names.includes(cur)) sel.value = '';
+  const fs = allFeatures();
+  const turn = fs.filter((f) => f.next?.kind === 'human').length;
+  const building = fs.filter((f) => ['building', 'spec_drafting', 'planning'].includes(f.status)).length;
+  const prs = fs.filter((f) => f.status === 'awaiting_merge').length;
+  const done = fs.filter((f) => f.status === 'done').length;
+  $('stats').innerHTML = `
+    <span class="stat ${turn ? 'hot' : ''}"><b>${turn}</b> waiting on you</span>
+    <span class="stat"><b>${building}</b> in progress</span>
+    <span class="stat"><b>${prs}</b> open PRs</span>
+    <span class="stat"><b>${done}</b> done</span>`;
+  $('updated').textContent = 'updated ' + new Date(data.generatedAt).toLocaleTimeString();
+}
+
+function card(f) {
+  const turn = f.next?.kind === 'human';
+  const cur = f.stages.find((s) => s.n === f.currentStage);
+  const openPr = f.stages.filter((s) => s.pr && s.status === 'pr_open').map((s) => `<a class="pr" href="${safeUrl(s.pr.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">PR #${s.pr.number}</a>`).join(' ');
+  const isSel = selected && selected.project === f.project && selected.feature === f.id;
+  return `<div class="card ${turn ? 'turn' : ''} ${isSel ? 'selected' : ''}" data-p="${esc(f.project)}" data-f="${esc(f.id)}">
+    <div class="row"><span class="chip">${esc(f.project)}</span>${turn ? '<span class="chip turn">your turn</span>' : `<span class="chip">${esc(STATUS_LABEL[f.status] || f.status)}</span>`}</div>
+    <div class="title">${esc(f.title)}</div>
+    <div class="id">${esc(f.id)}</div>
+    ${f.stages.length ? `<div class="pips" title="stages">${f.stages.map((s) => `<span class="pip" style="background:var(--s-${s.status})" title="Stage ${s.n}: ${esc(s.title)} — ${s.status}"></span>`).join('')}</div>` : ''}
+    ${cur ? `<div class="next">Stage ${cur.n}/${f.stages.length} · ${esc(cur.title)}${['building', 'reviewing'].includes(cur.status) ? ` · round ${cur.rounds}/${f.projectInfo.maxRounds}` : ''}</div>` : ''}
+    ${openPr ? `<div class="row" style="margin-top:4px">${openPr}</div>` : ''}
+    <div class="next" style="margin-top:6px">${esc(f.next?.detail || '')}</div>
+  </div>`;
+}
+
+function renderBoard() {
+  const fs = allFeatures();
+  if (!data.projects.length) {
+    $('board').innerHTML = `<div class="empty">No projects yet.<br><br>In Claude Code, run <code>/factory-init /path/to/your/repo</code></div>`;
+    return;
+  }
+  if (!fs.length) {
+    $('board').innerHTML = `<div class="empty">No features yet.<br><br>Run <code>/factory-issue ${esc($('project').value || data.projects[0].name)} describe what to build</code></div>`;
+    return;
+  }
+  $('board').innerHTML = `<div class="board">${COLUMNS.map((c) => {
+    const items = fs.filter((f) => c.statuses.includes(f.status)).sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+    return `<section class="col"><h2><span>${c.title}</span><span>${items.length}</span></h2><div class="list">${items.map(card).join('')}</div></section>`;
+  }).join('')}</div>`;
+}
+
+function renderEvents() {
+  const filter = $('project').value;
+  const evs = data.events.filter((e) => !filter || e.project === filter).slice(0, 80);
+  $('events').innerHTML = evs.length ? evs.map((e) => `<div class="ev"><div><span class="k">${esc(e.type)}</span> <span class="t">${esc(ago(e.at))}</span></div>
+    <div>${e.feature ? `<span class="id">${esc(e.project)}/${esc(e.feature)}</span><br>` : `<span class="id">${esc(e.project)}</span><br>`}${esc(e.message)}</div></div>`).join('')
+    : '<div class="next">Nothing yet.</div>';
+}
+
+async function loadDoc(project, feature, doc, force) {
+  const key = `${project}/${feature}/${doc}`;
+  const f = allFeatures().find((x) => x.project === project && x.id === feature);
+  const stamp = key + (f?.updatedAt || '');
+  if (!force && stamp === lastDocKey) return;
+  lastDocKey = stamp;
+  const r = await fetch(`/api/doc?project=${encodeURIComponent(project)}&feature=${encodeURIComponent(feature)}&doc=${encodeURIComponent(doc)}`);
+  const el = $('d-doc'); if (!el) return;
+  el.innerHTML = r.ok ? md(await r.text()) : '<p class="next">Not available.</p>';
+}
+
+function renderDrawer() {
+  const dr = $('drawer');
+  if (!selected) { dr.classList.remove('open'); dr.setAttribute('aria-hidden', 'true'); return; }
+  const p = data.projects.find((x) => x.name === selected.project);
+  const f = p?.features.find((x) => x.id === selected.feature);
+  if (!f) { selected = null; return renderDrawer(); }
+  dr.classList.add('open'); dr.setAttribute('aria-hidden', 'false');
+  $('d-head').innerHTML = `<div class="row"><span class="chip">${esc(p.name)}</span><span class="chip">${esc(STATUS_LABEL[f.status] || f.status)}</span></div>
+    <div class="title" style="font-size:16px">${esc(f.title)}</div><div class="id">${esc(f.id)} · ${esc(p.repo.slug || p.repo.path)} → ${esc(p.repo.baseBranch)}</div>`;
+  if (!selectedDoc || !f.docs.includes(selectedDoc)) {
+    selectedDoc = ['plan.md', 'spec.md', 'issue.md'].find((d) => f.docs.includes(d) && (d !== 'plan.md' || ['awaiting_plan_approval', 'building', 'awaiting_merge', 'needs_human', 'done'].includes(f.status))) || f.docs[0] || null;
+  }
+  const docLabel = (d) => d.replace(/^stages\/(\d+)\//, 's$1/').replace(/\.md$/, '');
+  const human = f.next?.kind === 'human' ? `<div class="callout"><b>Your turn:</b> ${esc(f.next.detail)}</div>` : '';
+  $('d-body').innerHTML = `${human}
+    ${f.stages.length ? `<div class="section">Stages</div><table class="stages"><tr><th>#</th><th>Stage</th><th>Status</th><th>Rounds</th><th>PR</th></tr>
+      ${f.stages.map((s) => `<tr><td>${s.n}</td><td>${esc(s.title)}<div class="id">${esc(s.branch || '')}</div></td>
+        <td><span class="dot" style="background:var(--s-${s.status})"></span>${esc(s.status)}</td>
+        <td>${s.rounds}/${p.maxRounds}${s.prRounds ? ` · PR ${s.prRounds}` : ''}</td>
+        <td>${s.pr ? `<a class="pr" href="${safeUrl(s.pr.url)}" target="_blank" rel="noopener">#${s.pr.number}</a>` : ''}</td></tr>`).join('')}</table>` : ''}
+    <div class="section">Documents</div>
+    <div class="tabs">${f.docs.map((d) => `<button data-doc="${esc(d)}" class="${d === selectedDoc ? 'on' : ''}">${esc(docLabel(d))}</button>`).join('') || '<span class="next">No documents yet.</span>'}</div>
+    <div class="doc" id="d-doc"></div>
+    <div class="section">History</div>
+    <div class="hist">${[...f.history].reverse().map((h) => `<div><span class="id">${esc(new Date(h.at).toLocaleString())}</span> · <b>${esc(h.status)}</b>${h.note ? ` — ${esc(h.note)}` : ''}</div>`).join('')}</div>
+    ${f.feedback.length ? `<div class="section">Your feedback</div><div class="hist">${f.feedback.map((x) => `<div><span class="id">${esc(x.gate)} · ${esc(ago(x.at))}</span> ${esc(x.text)}</div>`).join('')}</div>` : ''}`;
+  if (selectedDoc) { lastDocKey = ''; loadDoc(p.name, f.id, selectedDoc, true); }
+}
+
+function render() { if (!data) return; renderHeader(); renderBoard(); renderEvents(); renderDrawer(); }
+
+let lastPayload = '';
+async function poll() {
+  try {
+    const r = await fetch('/api/state', { cache: 'no-store' });
+    const text = await r.text();
+    if (text !== lastPayload) { lastPayload = text; data = JSON.parse(text); render(); }
+    else if (data) $('updated').textContent = 'updated ' + new Date().toLocaleTimeString();
+  } catch { $('updated').textContent = 'dashboard server not reachable'; }
+}
+
+document.addEventListener('click', (e) => {
+  const c = e.target.closest('.card');
+  if (c) { selected = { project: c.dataset.p, feature: c.dataset.f }; selectedDoc = null; render(); return; }
+  const b = e.target.closest('.tabs button');
+  if (b && selected) { selectedDoc = b.dataset.doc; renderDrawer(); }
+});
+$('d-close').onclick = () => { selected = null; render(); };
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && selected) { selected = null; render(); } });
+$('project').onchange = () => { store.set('sf.project', $('project').value); render(); };
+poll(); setInterval(poll, 3000);
+</script>
+</body>
+</html>
