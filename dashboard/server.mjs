@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 // Local Software Factory dashboard. Zero dependencies.
-// Reads projects/ (or $FACTORY_HOME/projects) and serves a live board on http://127.0.0.1:4317
+// Reads projects/ (or $FACTORY_HOME/projects) and serves a live board on http://127.0.0.1:4317.
+// Its one write: answering a spec/plan review gate (POST /api/review), done through scripts/factory.mjs.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFile } from 'node:child_process';
 import { nextAction } from '../scripts/factory.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+const CLI = path.resolve(HERE, '../scripts/factory.mjs');
 const SAFE = /^[A-Za-z0-9][\w.-]*$/;
 const DOC = /^(?:(?:issue|spec|plan)\.md|stages\/\d+\/[\w.-]+\.md)$/;
 
@@ -86,14 +89,83 @@ function readDoc(home, project, feature, doc) {
   return fs.readFileSync(file, 'utf8');
 }
 
+// Human review gates the dashboard can answer. Each decision is the same CLI calls /factory-approve makes
+// before it launches an agent; the agent work itself happens on the next /factory-next.
+const GATES = {
+  spec: { status: 'awaiting_spec_approval', approve: 'planning', revise: 'spec_drafting' },
+  plan: { status: 'awaiting_plan_approval', approve: 'building', revise: 'planning' },
+};
+const MAX_BODY = 64 * 1024;
+
+const cli = (home, args) =>
+  new Promise((resolve, reject) => {
+    execFile(process.execPath, [CLI, ...args], { env: { ...process.env, FACTORY_HOME: home } }, (err, _stdout, stderr) =>
+      err ? reject(new Error(String(stderr).replace(/^error:\s*/, '').trim() || err.message)) : resolve(),
+    );
+  });
+
+export async function review(home, { project, feature, gate, decision, text }) {
+  const g = GATES[gate];
+  if (!SAFE.test(project || '') || !SAFE.test(feature || '') || !g || !['approve', 'revise'].includes(decision)) return [400, 'bad request'];
+  text = typeof text === 'string' ? text.trim() : '';
+  if (decision === 'revise' && !text) return [400, 'feedback text is required to request changes'];
+  const stateFile = path.join(home, 'projects', project, 'features', feature, 'state.json');
+  if (!fs.existsSync(stateFile)) return [404, 'unknown feature'];
+  const { status } = readJSON(stateFile);
+  if (status !== g.status) return [409, `this ${gate} is no longer waiting for review (status: ${status})`];
+  if (decision === 'approve') {
+    await cli(home, ['feature:status', project, feature, g.approve, '--note', `${gate} approved (dashboard)`]);
+  } else {
+    await cli(home, ['feature:feedback', project, feature, '--gate', gate, '--text', text]);
+    await cli(home, ['feature:status', project, feature, g.revise, '--note', `${gate} changes requested (dashboard)`]);
+  }
+  return [200, null];
+}
+
+// The server is bound to 127.0.0.1, but a page on any other site can still send requests to it.
+// Writes must come from this dashboard: right Host (blocks DNS rebinding), same Origin, JSON body (forces a CORS preflight we never answer).
+function trustedWrite(req) {
+  const host = req.headers.host || '';
+  if (!/^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(host)) return false;
+  const origin = req.headers.origin;
+  if (origin && origin !== `http://${host}`) return false;
+  return (req.headers['content-type'] || '').split(';')[0].trim() === 'application/json';
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > MAX_BODY) {
+        reject(new Error('too large'));
+        req.destroy();
+      } else chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
 export function createServer(home) {
   const indexHtml = () => fs.readFileSync(path.join(HERE, 'index.html'));
-  return http.createServer((req, res) => {
+  return http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     const send = (code, type, body) => {
       res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
       res.end(body);
     };
+    const json = (code, obj) => send(code, 'application/json', JSON.stringify(obj));
+    if (req.method === 'POST' && url.pathname === '/api/review') {
+      if (!trustedWrite(req)) return json(403, { error: 'forbidden' });
+      try {
+        const [code, error] = await review(home, JSON.parse(await readBody(req)));
+        return json(code, error ? { error } : { ok: true });
+      } catch (err) {
+        return json(err instanceof SyntaxError ? 400 : 500, { error: err instanceof SyntaxError ? 'invalid JSON' : err.message });
+      }
+    }
     if (req.method !== 'GET') return send(405, 'text/plain', 'method not allowed');
     if (url.pathname === '/') return send(200, 'text/html; charset=utf-8', indexHtml());
     if (url.pathname === '/api/state') return send(200, 'application/json', JSON.stringify(snapshot(home)));

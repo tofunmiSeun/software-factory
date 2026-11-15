@@ -161,18 +161,59 @@ test('stage:pr refuses an empty branch, then pushes and opens a PR', () => {
 });
 
 test('stage:sync reports only new human feedback', () => {
+  const mine = () => ok('watch:check', 'my-app').items.filter((i) => i.feature === feature);
+  assert.deepEqual(mine(), [], 'open PR with no feedback is not work');
   const later = new Date(Date.now() + 60_000).toISOString();
   setGh((db) => {
     db.prs[0].comments.push({ author: { login: 'me' }, createdAt: later, body: 'Please rename --bg to --color-bg' });
     db.prs[0].comments.push({ author: { login: 'me' }, createdAt: later, body: 'Done. <!-- software-factory -->' });
     db.prs[0].inline.push({ user: { login: 'me' }, created_at: later, path: 'theme.css', line: 1, body: 'nit: add light value' });
   });
+  const w = ok('watch:check', 'my-app');
+  assert.equal(w.work, true);
+  assert.deepEqual(mine().map((i) => i.reason), ['review']);
+  assert.match(mine()[0].detail, /2 new review item\(s\) from me/);
   const r = ok('stage:sync', 'my-app', feature);
   assert.equal(r.result, 'open');
   assert.equal(r.newFeedback.length, 2);
   assert.deepEqual(r.newFeedback.map((x) => x.kind).sort(), ['comment', 'inline']);
   ok('stage:update', 'my-app', feature, '1', '--json', JSON.stringify({ lastFeedbackAt: r.latestFeedbackAt }));
   assert.equal(ok('stage:sync', 'my-app', feature).newFeedback.length, 0, 'acknowledged feedback not repeated');
+  assert.deepEqual(mine(), [], 'acknowledged feedback is not work');
+});
+
+test('identity: unpushed commits are re-authored on push; comments are signed and ignored as feedback', () => {
+  ok('config:set', 'my-app', 'identity.name', 'Software Factory');
+  ok('config:set', 'my-app', 'identity.email', 'me+factory@example.com');
+  fs.writeFileSync(path.join(wt, 'theme.css'), ':root { --bg: #111; }\n');
+  sh(wt, 'git', 'add', '.');
+  sh(wt, 'git', 'commit', '-qm', 'fix: darker bg');
+  const body = path.join(tmp, 'body.md');
+  assert.equal(ok('stage:pr', 'my-app', feature, '1', '--title', 'feat: theme tokens', '--body-file', body).reauthored, 1);
+  const log = sh(bare, 'git', 'log', '--format=%an <%ae> | %cn | %s', 'factory/001-add-dark-mode/s1-theme-tokens', '-2').split('\n');
+  assert.deepEqual(log, ['Software Factory <me+factory@example.com> | Software Factory | fix: darker bg', 'Test <test@example.com> | Test | feat: theme tokens'], 'already-pushed commit untouched');
+  assert.equal(ok('stage:pr', 'my-app', feature, '1', '--title', 'feat: theme tokens', '--body-file', body).reauthored, 0, 'nothing to redo');
+
+  const reply = path.join(tmp, 'reply.md');
+  fs.writeFileSync(reply, 'Renamed the token.');
+  ok('stage:comment', 'my-app', feature, '1', '--body-file', reply);
+  const c = gh().prs[0].comments.at(-1).body;
+  assert.match(c, /^\*\*🤖 Software Factory\*\*\n\nRenamed the token\.\n\n<!-- software-factory -->\n$/);
+  assert.deepEqual(ok('stage:sync', 'my-app', feature).newFeedback.filter((x) => x.body === c), [], 'own comment is not feedback');
+});
+
+test('run lock: one run per project; stale or force overrides', () => {
+  assert.equal(ok('run:lock', 'my-app', '--by', 'scheduled').acquired, true);
+  const second = ok('run:lock', 'my-app');
+  assert.equal(second.acquired, false);
+  assert.equal(second.heldBy, 'scheduled');
+  assert.equal(ok('watch:check', 'my-app').running, true);
+  assert.equal(ok('run:lock', 'my-app', '--force').acquired, true);
+  ok('run:unlock', 'my-app');
+  fs.writeFileSync(path.join(home, 'projects/my-app/run.lock'), JSON.stringify({ at: '2020-01-01T00:00:00Z', by: 'crashed' }));
+  assert.equal(ok('run:lock', 'my-app').acquired, true, 'stale lock ignored');
+  ok('run:unlock', 'my-app');
+  assert.equal(ok('watch:check', 'my-app').running, false);
 });
 
 test('stage:sync on merge cleans up and moves to the next stage, then finishes', () => {
@@ -180,6 +221,7 @@ test('stage:sync on merge cleans up and moves to the next stage, then finishes',
     db.prs[0].state = 'MERGED';
     db.prs[0].mergedAt = new Date().toISOString();
   });
+  assert.deepEqual(ok('watch:check', 'my-app').items.filter((i) => i.feature === feature).map((i) => i.reason), ['merged']);
   const r = ok('stage:sync', 'my-app', feature);
   assert.equal(r.result, 'merged');
   assert.equal(r.nextStage, 2);

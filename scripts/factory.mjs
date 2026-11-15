@@ -9,7 +9,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -205,8 +206,19 @@ function logEvent(p, f, type, message, data) {
   fs.appendFileSync(path.join(projectDir(p), 'events.jsonl'), JSON.stringify(line) + '\n');
 }
 
+// Factory-wide defaults for new projects (e.g. the commit identity), kept in projects/defaults.json
+// so personal details stay out of the repo. Each top-level object is merged over the built-in default.
+function withDefaults(config) {
+  const file = path.join(PROJECTS, 'defaults.json');
+  if (!fs.existsSync(file)) return config;
+  for (const [k, v] of Object.entries(readJSON(file))) {
+    config[k] = v && typeof v === 'object' && !Array.isArray(v) && config[k] && typeof config[k] === 'object' ? { ...config[k], ...v } : v;
+  }
+  return config;
+}
+
 function defaultConfig({ name, repoPath, remote, remoteUrl, host, slug, baseBranch }) {
-  return {
+  return withDefaults({
     name,
     createdAt: now(),
     repo: { path: repoPath, remote, remoteUrl, host, slug, baseBranch },
@@ -221,10 +233,13 @@ function defaultConfig({ name, repoPath, remote, remoteUrl, host, slug, baseBran
     planning: { prSize: 'small: one reviewable concern per PR', nextStageTrigger: 'merge' },
     gates: { spec: true, plan: true },
     prFeedback: { mode: 'builder-reads-pr' },
+    prWatch: { enabled: false, intervalMinutes: 15, taskId: null },
+    // Name/email on the factory's commits, and the signature on its PR comments. gh still acts as your login.
+    identity: { name: null, email: null, signature: '🤖 Software Factory' },
     offLimits: [],
     notes: '',
     setupComplete: false,
-  };
+  });
 }
 
 // ---------- commands ----------
@@ -475,6 +490,36 @@ function requireGitHub(config) {
   if (!config.repo.slug) die('could not work out owner/repo from the remote URL');
 }
 
+// The factory's commit identity, if configured. Env vars win over git config and over any GIT_AUTHOR_* already set.
+function identityEnv(config) {
+  const { name, email } = config.identity || {};
+  if (!name || !email) return null;
+  return { ...process.env, GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email };
+}
+
+// Re-author the stage's commits that are not on the remote yet, so the builder's commits carry the factory identity.
+// Pushed commits are never rewritten (that would need a force-push).
+function applyIdentity(config, stage) {
+  const env = identityEnv(config);
+  if (!env) return 0;
+  const { remote } = config.repo;
+  tryGit(stage.worktree, 'fetch', '--quiet', remote, `+refs/heads/${stage.branch}:refs/remotes/${remote}/${stage.branch}`);
+  const pushed = tryGit(stage.worktree, 'rev-parse', '--verify', '--quiet', `refs/remotes/${remote}/${stage.branch}`);
+  const upstream = pushed ? `${remote}/${stage.branch}` : stage.baseSha;
+  if (!upstream) return 0;
+  const authors = (tryGit(stage.worktree, 'log', '--format=%an%x00%ae%x00%cn%x00%ce', `${upstream}..HEAD`) || '').split('\n').filter(Boolean);
+  const want = `${env.GIT_AUTHOR_NAME}\0${env.GIT_AUTHOR_EMAIL}`;
+  if (authors.every((a) => a === `${want}\0${want}`)) return 0;
+  if (tryGit(stage.worktree, 'status', '--porcelain')) die('worktree has uncommitted changes; commit them before opening the PR');
+  try {
+    run('git', ['-C', stage.worktree, 'rebase', '--quiet', '--no-autosquash', '--exec', 'git commit --quiet --amend --no-edit --no-verify --reset-author', upstream], { env });
+  } catch (err) {
+    tryGit(stage.worktree, 'rebase', '--abort');
+    throw err;
+  }
+  return authors.length;
+}
+
 // Push the stage branch and open (or reuse) its pull request.
 commands['stage:pr'] = ({ positional: [p, f, n], flags }) => {
   const config = loadConfig(p);
@@ -486,6 +531,7 @@ commands['stage:pr'] = ({ positional: [p, f, n], flags }) => {
   const ahead = git(stage.worktree, 'rev-list', '--count', `${stage.baseSha || `${config.repo.remote}/${config.repo.baseBranch}`}..HEAD`);
   if (Number(ahead) === 0) die('branch has no commits to open a PR with');
 
+  const reauthored = applyIdentity(config, stage);
   git(stage.worktree, 'push', '--quiet', '-u', config.repo.remote, `HEAD:refs/heads/${stage.branch}`);
   const repoArgs = ['--repo', config.repo.slug];
   let pr = JSON.parse(tryRun('gh', ['pr', 'view', stage.branch, ...repoArgs, '--json', 'number,url,state']) || 'null');
@@ -493,7 +539,8 @@ commands['stage:pr'] = ({ positional: [p, f, n], flags }) => {
     const body = fs.readFileSync(path.resolve(flags['body-file']), 'utf8');
     const bodyFile = path.join(featureDir(p, f), 'stages', String(n), 'pr-body.md');
     fs.mkdirSync(path.dirname(bodyFile), { recursive: true });
-    fs.writeFileSync(bodyFile, `${body.trim()}\n\n${PR_MARKER}\n`);
+    const sig = config.identity?.signature ? `\n\n---\n_${config.identity.signature}_` : '';
+    fs.writeFileSync(bodyFile, `${body.trim()}${sig}\n\n${PR_MARKER}\n`);
     run('gh', ['pr', 'create', ...repoArgs, '--base', config.repo.baseBranch, '--head', stage.branch, '--title', flags.title, '--body-file', bodyFile], { cwd: stage.worktree });
     pr = JSON.parse(run('gh', ['pr', 'view', stage.branch, ...repoArgs, '--json', 'number,url,state']));
   }
@@ -504,8 +551,133 @@ commands['stage:pr'] = ({ positional: [p, f, n], flags }) => {
   state.history.push({ at: now(), status: 'awaiting_merge', note: `stage ${n} PR #${pr.number}` });
   saveState(p, f, state);
   logEvent(p, f, 'stage.pr', `stage ${n} PR #${pr.number} ${pr.url}`);
-  out(stage);
+  out({ ...stage, reauthored });
 };
+
+// Post a factory comment on a stage's PR: signature on top, marker at the end so the factory ignores it later.
+commands['stage:comment'] = ({ positional: [p, f, n], flags }) => {
+  const config = loadConfig(p);
+  requireGitHub(config);
+  const stage = getStage(loadState(p, f), n);
+  if (!stage.pr) die(`stage ${stage.n} has no PR`);
+  if (typeof flags['body-file'] !== 'string') die('usage: stage:comment <project> <feature> <n> --body-file <path>');
+  const body = fs.readFileSync(path.resolve(flags['body-file']), 'utf8').replaceAll(PR_MARKER, '').trim();
+  if (!body) die('comment body is empty');
+  const sig = config.identity?.signature ? `**${config.identity.signature}**\n\n` : '';
+  const file = path.join(featureDir(p, f), 'stages', String(stage.n), `comment-${Date.now()}.md`);
+  fs.writeFileSync(file, `${sig}${body}\n\n${PR_MARKER}\n`);
+  run('gh', ['pr', 'comment', String(stage.pr.number), '--repo', config.repo.slug, '--body-file', file]);
+  logEvent(p, f, 'stage.comment', `stage ${stage.n} PR #${stage.pr.number}: comment posted`);
+  out({ posted: true, pr: stage.pr.number, file });
+};
+
+// Capture screenshots of a stage's UI and publish them to the factory-screenshots branch.
+// Reads stages/<n>/screenshots.json (written by the builder):
+//   { "serve": "npm run dev -- --port 5199 --strictPort", "cwd": "business-ui", "port": 5199,
+//     "shots": [{ "name": "landing", "path": "/" }] }
+// Prints markdown for the PR body. Each shot is taken at desktop and mobile width with headless Chrome.
+const SCREENSHOT_BRANCH = 'factory-screenshots';
+const CHROME = process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+commands['stage:screenshots'] = ({ positional: [p, f, n] }) => {
+  const config = loadConfig(p);
+  requireGitHub(config);
+  const state = loadState(p, f);
+  const stage = getStage(state, n);
+  if (!stage.worktree || !fs.existsSync(stage.worktree)) die('stage has no worktree');
+  const specFile = path.join(featureDir(p, f), 'stages', String(n), 'screenshots.json');
+  if (!fs.existsSync(specFile)) die(`no ${specFile}; the builder writes this when a stage changes the frontend`);
+  if (!fs.existsSync(CHROME)) die(`Chrome not found at ${CHROME} (set CHROME_PATH)`);
+  const spec = readJSON(specFile);
+  const port = Number(spec.port);
+  if (!spec.serve || !port || !Array.isArray(spec.shots) || !spec.shots.length) die('screenshots.json needs serve, port and shots[]');
+  const cwd = path.resolve(stage.worktree, spec.cwd || '.');
+  if (!cwd.startsWith(path.resolve(stage.worktree))) die('screenshots.json cwd must stay inside the worktree');
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-shots-'));
+  const server = spawn('sh', ['-c', spec.serve], { cwd, detached: true, stdio: 'ignore' });
+  const files = [];
+  try {
+    let up = false;
+    for (let i = 0; i < 60 && !up; i++) {
+      up = tryRun('curl', ['-s', '-o', '/dev/null', '--max-time', '2', `http://localhost:${port}/`]) !== null;
+      if (!up) execFileSync('sleep', ['1']);
+    }
+    if (!up) die(`dev server did not come up on port ${port} within 60s`);
+    for (const shot of spec.shots) {
+      const target = `http://localhost:${port}${shot.path || '/'}`;
+      const chrome = (size, file, url) =>
+        run(CHROME, ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--virtual-time-budget=5000', `--window-size=${size}`, `--screenshot=${file}`, url]);
+      const desktop = `${slugify(shot.name)}-desktop.png`;
+      chrome('1280,800', path.join(tmp, desktop), target);
+      files.push({ name: desktop, shot: shot.name, label: 'desktop' });
+      // Headless Chrome has a minimum window width, so a 390px window renders a wider layout.
+      // Render the page in a real 390px-wide iframe instead, then centre-crop to it (sips ignores --cropOffset, so the 800px window puts the iframe at x=205).
+      const mobile = `${slugify(shot.name)}-mobile.png`;
+      const wrapper = path.join(tmp, 'mobile.html');
+      fs.writeFileSync(wrapper, `<!doctype html><body style="margin:0;background:#fff"><iframe src="${target}" style="border:0;width:390px;height:844px;display:block;margin-left:205px"></iframe>`);
+      chrome('800,844', path.join(tmp, mobile), `file://${wrapper}`);
+      run('sips', ['-c', '844', '390', path.join(tmp, mobile)]);
+      files.push({ name: mobile, shot: shot.name, label: 'mobile' });
+    }
+  } finally {
+    try { process.kill(-server.pid); } catch {}
+  }
+
+  // Publish to an orphan branch (never force-pushed; history is only appended to).
+  const repo = path.join(tmp, 'repo');
+  fs.mkdirSync(repo);
+  git(repo, 'init', '--quiet');
+  git(repo, 'remote', 'add', 'origin', config.repo.remoteUrl);
+  if (tryGit(repo, 'fetch', '--quiet', '--depth', '1', 'origin', SCREENSHOT_BRANCH) !== null) git(repo, 'checkout', '--quiet', '-B', SCREENSHOT_BRANCH, 'FETCH_HEAD');
+  else git(repo, 'checkout', '--quiet', '--orphan', SCREENSHOT_BRANCH);
+  const dir = `${f}/s${n}/${Date.now()}`;
+  fs.mkdirSync(path.join(repo, dir), { recursive: true });
+  for (const x of files) fs.copyFileSync(path.join(tmp, x.name), path.join(repo, dir, x.name));
+  git(repo, 'add', '-A');
+  git(repo, '-c', 'user.name=software-factory', '-c', 'user.email=software-factory@users.noreply.github.com', 'commit', '--quiet', '-m', `screenshots for ${f} stage ${n}`);
+  git(repo, 'push', '--quiet', 'origin', `HEAD:refs/heads/${SCREENSHOT_BRANCH}`);
+
+  const url = (x) => `https://github.com/${config.repo.slug}/blob/${SCREENSHOT_BRANCH}/${dir}/${x.name}?raw=true`;
+  const md = ['## Screenshots', ''];
+  for (const shot of spec.shots) {
+    md.push(`**${shot.name}** (\`${shot.path || '/'}\`)`, '');
+    md.push('| Desktop | Mobile |', '|---|---|');
+    const [d, m] = ['desktop', 'mobile'].map((l) => files.find((x) => x.shot === shot.name && x.label === l));
+    md.push(`| <img src="${url(d)}" width="520"> | <img src="${url(m)}" width="180"> |`, '');
+  }
+  const mdFile = path.join(featureDir(p, f), 'stages', String(n), 'screenshots.md');
+  fs.writeFileSync(mdFile, md.join('\n'));
+  fs.rmSync(tmp, { recursive: true, force: true });
+  logEvent(p, f, 'stage.screenshots', `stage ${n}: ${files.length} screenshots`);
+  out({ markdownFile: mdFile, count: files.length });
+};
+
+// Read a stage's PR and the human feedback on it newer than lastFeedbackAt (the factory's own comments excluded).
+// Read-only: shared by stage:sync (which acts on it) and watch:check (which only reports it).
+function prActivity(config, stage) {
+  const pr = JSON.parse(
+    run('gh', ['pr', 'view', String(stage.pr.number), '--repo', config.repo.slug, '--json', 'state,mergedAt,reviewDecision,reviews,comments,url'])
+  );
+  const feedback = [];
+  if (pr.state !== 'OPEN') return { pr, feedback };
+  const since = stage.lastFeedbackAt ? Date.parse(stage.lastFeedbackAt) : 0;
+  const notOurs = (body) => !String(body || '').includes(PR_MARKER);
+  for (const r of pr.reviews || []) {
+    const at = r.submittedAt;
+    if (Date.parse(at) > since && notOurs(r.body) && (r.body?.trim() || r.state === 'CHANGES_REQUESTED'))
+      feedback.push({ kind: 'review', state: r.state, author: r.author?.login, at, body: r.body });
+  }
+  for (const c of pr.comments || []) {
+    if (Date.parse(c.createdAt) > since && notOurs(c.body)) feedback.push({ kind: 'comment', author: c.author?.login, at: c.createdAt, body: c.body });
+  }
+  const inline = JSON.parse(tryRun('gh', ['api', `repos/${config.repo.slug}/pulls/${stage.pr.number}/comments`, '--paginate']) || '[]');
+  for (const c of inline) {
+    if (Date.parse(c.created_at) > since && notOurs(c.body))
+      feedback.push({ kind: 'inline', author: c.user?.login, at: c.created_at, path: c.path, line: c.line ?? c.original_line, body: c.body });
+  }
+  feedback.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  return { pr, feedback };
+}
 
 // Check a stage's PR. Merged → clean up and move to the next stage (or finish).
 // Open → report review feedback newer than lastFeedbackAt, excluding the factory's own comments.
@@ -515,9 +687,7 @@ commands['stage:sync'] = ({ positional: [p, f, nArg] }) => {
   const state = loadState(p, f);
   const stage = getStage(state, nArg ?? state.currentStage);
   if (!stage.pr) die(`stage ${stage.n} has no PR`);
-  const pr = JSON.parse(
-    run('gh', ['pr', 'view', String(stage.pr.number), '--repo', config.repo.slug, '--json', 'state,mergedAt,reviewDecision,reviews,comments,url'])
-  );
+  const { pr, feedback } = prActivity(config, stage);
 
   if (pr.state === 'MERGED') {
     stage.status = 'merged';
@@ -557,23 +727,6 @@ commands['stage:sync'] = ({ positional: [p, f, nArg] }) => {
     return;
   }
 
-  const since = stage.lastFeedbackAt ? Date.parse(stage.lastFeedbackAt) : 0;
-  const notOurs = (body) => !String(body || '').includes(PR_MARKER);
-  const feedback = [];
-  for (const r of pr.reviews || []) {
-    const at = r.submittedAt;
-    if (Date.parse(at) > since && notOurs(r.body) && (r.body?.trim() || r.state === 'CHANGES_REQUESTED'))
-      feedback.push({ kind: 'review', state: r.state, author: r.author?.login, at, body: r.body });
-  }
-  for (const c of pr.comments || []) {
-    if (Date.parse(c.createdAt) > since && notOurs(c.body)) feedback.push({ kind: 'comment', author: c.author?.login, at: c.createdAt, body: c.body });
-  }
-  const inline = JSON.parse(tryRun('gh', ['api', `repos/${config.repo.slug}/pulls/${stage.pr.number}/comments`, '--paginate']) || '[]');
-  for (const c of inline) {
-    if (Date.parse(c.created_at) > since && notOurs(c.body))
-      feedback.push({ kind: 'inline', author: c.user?.login, at: c.created_at, path: c.path, line: c.line ?? c.original_line, body: c.body });
-  }
-  feedback.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
   out({
     result: 'open',
     stage: stage.n,
@@ -583,6 +736,66 @@ commands['stage:sync'] = ({ positional: [p, f, nArg] }) => {
     latestFeedbackAt: feedback.length ? feedback.at(-1).at : stage.lastFeedbackAt,
     marker: PR_MARKER,
   });
+};
+
+// Cheap pre-check for the scheduled PR watcher: is there anything for /factory-next to do?
+// Never changes state, so it is safe to run every few minutes. Human gates don't count as work.
+commands['watch:check'] = ({ positional: [only] }) => {
+  const items = [];
+  for (const p of only ? [only] : listProjects()) {
+    const config = loadConfig(p);
+    for (const f of listFeatures(p)) {
+      const state = loadState(p, f);
+      const next = nextAction(config, state);
+      if (next.kind === 'agent') items.push({ project: p, feature: f, reason: next.action, detail: next.detail });
+      if (next.kind !== 'github') continue;
+      const stage = state.stages.find((s) => s.n === state.currentStage);
+      if (!stage?.pr) continue;
+      let activity;
+      try {
+        requireGitHub(config);
+        activity = prActivity(config, stage);
+      } catch (err) {
+        items.push({ project: p, feature: f, reason: 'error', detail: `PR #${stage.pr.number}: ${err.message}` });
+        continue;
+      }
+      const { pr, feedback } = activity;
+      if (pr.state === 'MERGED') items.push({ project: p, feature: f, reason: 'merged', detail: `PR #${stage.pr.number} merged` });
+      else if (pr.state === 'CLOSED') items.push({ project: p, feature: f, reason: 'closed', detail: `PR #${stage.pr.number} closed without merge` });
+      else if (feedback.length)
+        items.push({ project: p, feature: f, reason: 'review', detail: `PR #${stage.pr.number}: ${feedback.length} new review item(s) from ${[...new Set(feedback.map((x) => x.author).filter(Boolean))].join(', ') || 'someone'}` });
+    }
+  }
+  const lock = only ? readLock(only) : null;
+  out({ work: items.some((i) => i.reason !== 'error'), running: !!lock, items });
+};
+
+// One /factory-next run per project at a time, so a scheduled run never overlaps a manual one or a slow previous run.
+// A lock older than LOCK_TTL is treated as left behind by a crashed run.
+const LOCK_TTL_MS = 3 * 60 * 60 * 1000;
+const lockFile = (p) => path.join(projectDir(p), 'run.lock');
+function readLock(p) {
+  const file = lockFile(p);
+  if (!fs.existsSync(file)) return null;
+  try {
+    const lock = readJSON(file);
+    return Date.now() - Date.parse(lock.at) < LOCK_TTL_MS ? lock : null;
+  } catch {
+    return null;
+  }
+}
+commands['run:lock'] = ({ positional: [p], flags }) => {
+  loadConfig(p);
+  const held = readLock(p);
+  if (held && !flags.force) return out({ acquired: false, heldBy: held.by, since: held.at });
+  const lock = { at: now(), by: typeof flags.by === 'string' ? flags.by : 'factory-next' };
+  writeJSON(lockFile(p), lock);
+  out({ acquired: true, ...lock });
+};
+commands['run:unlock'] = ({ positional: [p] }) => {
+  loadConfig(p);
+  fs.rmSync(lockFile(p), { force: true });
+  out({ released: true });
 };
 
 commands['event'] = ({ positional: [p, f, type, ...msg] }) => {
@@ -683,11 +896,15 @@ function usage() {
   stage:start <project> <feature> [n]    create/resume worktree + branch for a stage
   stage:round <project> <feature> <n> [--kind review|pr]
   stage:update <project> <feature> <n> --json '{...}'
+  stage:screenshots <project> <feature> <n>   capture + publish UI screenshots, writes stages/<n>/screenshots.md
   stage:pr <project> <feature> <n> --title "<title>" --body-file <path>
   stage:sync <project> <feature> [n]     check PR: merged / closed / new feedback
+  stage:comment <project> <feature> <n> --body-file <path>   reply on the PR (adds signature + marker)
 
   event <project> <feature|-> <type> <message>
   next [project]                         next action for every active feature
+  watch:check [project]                  anything for /factory-next to do? (checks PRs, changes nothing)
+  run:lock <project> [--by who] [--force] | run:unlock <project>
   status [--json]`;
 }
 

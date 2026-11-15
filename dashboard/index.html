@@ -76,6 +76,11 @@
   .section { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 18px 0 6px; }
   .callout { background: var(--accent-soft); color: var(--ink); border-left: 3px solid var(--accent); padding: 9px 12px; border-radius: 6px; font-size: 13px; margin: 10px 0; }
   .callout code { font-family: var(--mono); }
+  .review { margin-top: 14px; padding: 12px 14px; border: 1px solid var(--accent); border-radius: 9px; background: var(--accent-soft); }
+  .review textarea { width: 100%; font: 13px/1.45 system-ui, -apple-system, sans-serif; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); resize: vertical; }
+  .btn { font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .btn:disabled { opacity: .55; cursor: default; }
   @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } aside.activity { position: static; max-height: none; border-left: 0; border-top: 1px solid var(--line); } }
 </style>
 </head>
@@ -221,23 +226,88 @@ async function loadDoc(project, feature, doc, force) {
   lastDocKey = stamp;
   const r = await fetch(`/api/doc?project=${encodeURIComponent(project)}&feature=${encodeURIComponent(feature)}&doc=${encodeURIComponent(doc)}`);
   const el = $('d-doc'); if (!el) return;
-  el.innerHTML = r.ok ? md(await r.text()) : '<p class="next">Not available.</p>';
+  const text = r.ok ? await r.text() : null;
+  if ($('d-doc') !== el) return; // the drawer was rebuilt while this was loading
+  el.innerHTML = text !== null ? md(text) : '<p class="next">Not available.</p>';
 }
 
+const GATES = {
+  awaiting_spec_approval: { gate: 'spec', doc: 'spec.md', what: 'spec', after: 'planning' },
+  awaiting_plan_approval: { gate: 'plan', doc: 'plan.md', what: 'plan', after: 'building stage 1' },
+};
+const draftKey = (p, f, gate) => `sf.draft.${p}/${f}/${gate}`;
+let reviewNotice = null; // { key, html } shown after a decision until the feature moves on
+
+function reviewPanel(p, f) {
+  const g = GATES[f.status];
+  if (!g) return '';
+  const key = draftKey(p.name, f.id, g.gate);
+  return `<div class="review" data-gate="${g.gate}">
+    <div class="section" style="margin-top:0">Review the ${g.what}</div>
+    <textarea id="r-text" rows="4" placeholder="What should change? Leave empty to approve as is.">${esc(store.get(key) || '')}</textarea>
+    <div class="row" style="margin-top:8px">
+      <button class="btn primary" data-review="approve">Approve ${g.what}</button>
+      <button class="btn" data-review="revise">Request changes</button>
+      <span class="next" id="r-msg"></span>
+    </div>
+  </div>`;
+}
+
+async function submitReview(decision) {
+  const p = data.projects.find((x) => x.name === selected?.project);
+  const f = p?.features.find((x) => x.id === selected.feature);
+  const g = f && GATES[f.status];
+  if (!g) return;
+  const text = $('r-text').value.trim();
+  const msg = $('r-msg');
+  if (decision === 'revise' && !text) { msg.textContent = 'Write what should change first.'; $('r-text').focus(); return; }
+  if (decision === 'approve' && text && !confirm('You have feedback typed. Approve anyway and discard it?')) return;
+  document.querySelectorAll('[data-review]').forEach((b) => { b.disabled = true; });
+  msg.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/review', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ project: p.name, feature: f.id, gate: g.gate, decision, text }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+    try { localStorage.removeItem(draftKey(p.name, f.id, g.gate)); } catch {}
+    const did = decision === 'approve' ? `${g.what[0].toUpperCase() + g.what.slice(1)} approved.` : 'Feedback sent.';
+    const then = decision === 'approve' ? `start ${g.after}` : `revise the ${g.what}`;
+    reviewNotice = { key: `${p.name}/${f.id}`, html: `<b>${did}</b> Run <code>/factory-next ${esc(p.name)}</code> in Claude Code to ${then}.` };
+    await poll();
+  } catch (err) {
+    msg.textContent = `Couldn't save: ${err.message}`;
+    document.querySelectorAll('[data-review]').forEach((b) => { b.disabled = false; });
+  }
+}
+
+let lastDrawerKey = '';
 function renderDrawer() {
   const dr = $('drawer');
-  if (!selected) { dr.classList.remove('open'); dr.setAttribute('aria-hidden', 'true'); return; }
+  if (!selected) { dr.classList.remove('open'); dr.setAttribute('aria-hidden', 'true'); lastDrawerKey = ''; return; }
   const p = data.projects.find((x) => x.name === selected.project);
   const f = p?.features.find((x) => x.id === selected.feature);
   if (!f) { selected = null; return renderDrawer(); }
   dr.classList.add('open'); dr.setAttribute('aria-hidden', 'false');
+  // The post-decision notice belongs to one feature and goes away once it is back at a gate.
+  if (reviewNotice && (reviewNotice.key !== `${p.name}/${f.id}` || GATES[f.status])) reviewNotice = null;
+  // Only rebuild when this feature actually changed, and keep the scroll position when it does.
+  const drawerKey = JSON.stringify([f, p.maxRounds, p.repo, selectedDoc, reviewNotice]);
+  if (drawerKey === lastDrawerKey) return;
+  lastDrawerKey = drawerKey;
+  const scroll = $('d-body').scrollTop;
   $('d-head').innerHTML = `<div class="row"><span class="chip">${esc(p.name)}</span><span class="chip">${esc(STATUS_LABEL[f.status] || f.status)}</span></div>
     <div class="title" style="font-size:16px">${esc(f.title)}</div><div class="id">${esc(f.id)} · ${esc(p.repo.slug || p.repo.path)} → ${esc(p.repo.baseBranch)}</div>`;
   if (!selectedDoc || !f.docs.includes(selectedDoc)) {
     selectedDoc = ['plan.md', 'spec.md', 'issue.md'].find((d) => f.docs.includes(d) && (d !== 'plan.md' || ['awaiting_plan_approval', 'building', 'awaiting_merge', 'needs_human', 'done'].includes(f.status))) || f.docs[0] || null;
   }
   const docLabel = (d) => d.replace(/^stages\/(\d+)\//, 's$1/').replace(/\.md$/, '');
-  const human = f.next?.kind === 'human' ? `<div class="callout"><b>Your turn:</b> ${esc(f.next.detail)}</div>` : '';
+  const gate = GATES[f.status];
+  const human = reviewNotice ? `<div class="callout">${reviewNotice.html}</div>`
+    : gate ? `<div class="callout"><b>Your turn:</b> read the ${gate.what} below, then approve it or request changes at the bottom.</div>`
+    : f.next?.kind === 'human' ? `<div class="callout"><b>Your turn:</b> ${esc(f.next.detail)}</div>` : '';
+  const draft = $('r-text') ? { gate: $('r-text').closest('.review')?.dataset.gate, value: $('r-text').value } : null;
   $('d-body').innerHTML = `${human}
     ${f.stages.length ? `<div class="section">Stages</div><table class="stages"><tr><th>#</th><th>Stage</th><th>Status</th><th>Rounds</th><th>PR</th></tr>
       ${f.stages.map((s) => `<tr><td>${s.n}</td><td>${esc(s.title)}<div class="id">${esc(s.branch || '')}</div></td>
@@ -247,29 +317,42 @@ function renderDrawer() {
     <div class="section">Documents</div>
     <div class="tabs">${f.docs.map((d) => `<button data-doc="${esc(d)}" class="${d === selectedDoc ? 'on' : ''}">${esc(docLabel(d))}</button>`).join('') || '<span class="next">No documents yet.</span>'}</div>
     <div class="doc" id="d-doc"></div>
+    ${reviewPanel(p, f)}
     <div class="section">History</div>
     <div class="hist">${[...f.history].reverse().map((h) => `<div><span class="id">${esc(new Date(h.at).toLocaleString())}</span> · <b>${esc(h.status)}</b>${h.note ? ` — ${esc(h.note)}` : ''}</div>`).join('')}</div>
     ${f.feedback.length ? `<div class="section">Your feedback</div><div class="hist">${f.feedback.map((x) => `<div><span class="id">${esc(x.gate)} · ${esc(ago(x.at))}</span> ${esc(x.text)}</div>`).join('')}</div>` : ''}`;
-  if (selectedDoc) { lastDocKey = ''; loadDoc(p.name, f.id, selectedDoc, true); }
+  if (draft && gate && draft.gate === gate.gate && $('r-text')) $('r-text').value = draft.value;
+  const restore = () => { $('d-body').scrollTop = scroll; };
+  if (selectedDoc) { lastDocKey = ''; loadDoc(p.name, f.id, selectedDoc, true).then(restore); } else restore();
 }
 
 function render() { if (!data) return; renderHeader(); renderBoard(); renderEvents(); renderDrawer(); }
 
+// generatedAt changes on every poll, so compare everything except it; otherwise the
+// board and the open drawer were rebuilt every 3s (losing scroll, tabs and typed text).
 let lastPayload = '';
 async function poll() {
   try {
     const r = await fetch('/api/state', { cache: 'no-store' });
-    const text = await r.text();
-    if (text !== lastPayload) { lastPayload = text; data = JSON.parse(text); render(); }
+    const next = await r.json();
+    const key = JSON.stringify({ ...next, generatedAt: null });
+    if (key !== lastPayload) { lastPayload = key; data = next; render(); }
     else if (data) $('updated').textContent = 'updated ' + new Date().toLocaleTimeString();
   } catch { $('updated').textContent = 'dashboard server not reachable'; }
 }
 
 document.addEventListener('click', (e) => {
   const c = e.target.closest('.card');
-  if (c) { selected = { project: c.dataset.p, feature: c.dataset.f }; selectedDoc = null; render(); return; }
+  if (c) { selected = { project: c.dataset.p, feature: c.dataset.f }; selectedDoc = null; $('d-body').scrollTop = 0; render(); return; }
   const b = e.target.closest('.tabs button');
-  if (b && selected) { selectedDoc = b.dataset.doc; renderDrawer(); }
+  if (b && selected) { selectedDoc = b.dataset.doc; renderDrawer(); return; }
+  const r = e.target.closest('[data-review]');
+  if (r && selected) submitReview(r.dataset.review);
+});
+document.addEventListener('input', (e) => {
+  if (e.target.id !== 'r-text' || !selected) return;
+  const gate = e.target.closest('.review')?.dataset.gate;
+  if (gate) store.set(draftKey(selected.project, selected.feature, gate), e.target.value);
 });
 $('d-close').onclick = () => { selected = null; render(); };
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && selected) { selected = null; render(); } });

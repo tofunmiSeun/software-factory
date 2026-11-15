@@ -8,6 +8,13 @@ argument-hint: "[project] [feature]"
 
 Arguments: `$ARGUMENTS` (optional project and/or feature to limit the run)
 
+For each project you will work on, take its run lock first, so a scheduled PR-watch run and a manual run never work on the same feature at once:
+```
+node scripts/factory.mjs run:lock <project>
+```
+If `acquired` is false, another run is in progress: skip that project and say so (mention `heldBy` and `since`). Only if the user explicitly says the other run is dead, retry with `--force`.
+**Always** release it when you are done with the project, including when you stop early or hit an error: `node scripts/factory.mjs run:unlock <project>`.
+
 ```
 node scripts/factory.mjs next [project]
 ```
@@ -15,8 +22,8 @@ Handle items one feature at a time, in order. For each item, act on `action`:
 
 | action | do |
 |---|---|
-| `draft-spec` | the spec step in `.claude/skills/factory-issue/SKILL.md` (sections 3–4) |
-| `plan` | "Approve spec" in `.claude/skills/factory-approve/SKILL.md`, from launching the work-planner onward |
+| `draft-spec` | the spec step in `.claude/skills/factory-issue/SKILL.md` (sections 3–4). If the feature has `gate: spec` feedback (e.g. changes requested from the dashboard), pass all of it as FEEDBACK, newest last, and tell the spec-builder to revise the existing spec.md |
+| `plan` | `project:refresh <project>`, then "Approve spec" in `.claude/skills/factory-approve/SKILL.md` from launching the work-planner onward. If the feature has `gate: plan` feedback, pass all of it as FEEDBACK and tell the planner to revise plan.md |
 | `build-stage` | **Build loop** for `stage`, then **Open the PR** |
 | `sync-pr` | **Sync the PR** |
 | `approve-spec`, `approve-plan`, `unblock` | nothing. List it under "Waiting on you" at the end |
@@ -52,6 +59,7 @@ node scripts/factory.mjs feature:status <project> <feature> needs_human --note "
 Stop working on this feature.
 
 ## Open the PR
+0. **Screenshots (frontend changes):** if `F/stages/<n>/screenshots.json` exists, run `node scripts/factory.mjs stage:screenshots <project> <feature> <n>`. It starts the dev server, captures desktop and mobile shots with headless Chrome, pushes them to the `factory-screenshots` branch and writes `F/stages/<n>/screenshots.md`. Append that file's content to the PR body. If it fails, open the PR anyway and note under **Testing** that screenshots could not be captured and why. Redo this step after any builder round that changes the UI.
 1. Write `F/stages/<n>/pr-body-src.md`. If `conventions.prTemplate` is set, follow the template from the worktree. Otherwise use:
    - **Summary**: what this PR does, in 2–4 lines
    - **Context**: feature title, stage `<n>` of `<total>`, and one line on how it fits the plan
@@ -78,7 +86,7 @@ Stop working on this feature.
     3. `stage:start <project> <feature> <n>` to make sure the worktree exists. It resumes the existing one.
     4. Builder with FIX = that file. Then the reviewer. If it FAILs, run the builder once more with the review, then review again. Don't run more than two builder passes per PR round.
     5. `stage:pr` again, with the same title and body file. This pushes the new commits to the open PR.
-    6. Reply on the PR: `gh pr comment <number> --repo <owner/repo> --body-file <file>`. The file lists each feedback item and what changed. It **must end with `<!-- software-factory -->`** so the factory ignores its own comment.
+    6. Reply on the PR: write a file listing each feedback item and what changed, then `node scripts/factory.mjs stage:comment <project> <feature> <n> --body-file <file>`. It adds the factory's signature and the `<!-- software-factory -->` marker. Don't post with `gh pr comment` directly.
     7. `stage:update ... --json '{"status":"pr_open","lastFeedbackAt":"<latestFeedbackAt from the sync>"}'` and `feature:status ... awaiting_merge`.
 
 ## Finish

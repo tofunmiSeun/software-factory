@@ -39,6 +39,10 @@ Then in Claude Code:
 ```
 In a second terminal, run the dashboard: `npm run dashboard` → http://localhost:4317
 
+During `/factory-init` you can turn on the **PR watcher**: a scheduled task (in the Claude desktop app) that checks the factory's open PRs every 15/30/60 minutes with `gh` (`node scripts/factory.mjs watch:check <project>`). When a PR gets a review or comment, or merges, it runs `/factory-next` for you, so the builder addresses the review and the next stage starts. It runs only while the desktop app is open.
+
+You can review specs and plans from the dashboard: open a feature that is waiting on you, read the spec (or plan), then **Approve** or **Request changes**. The dashboard records your decision; run `/factory-next` in Claude Code to start the next step.
+
 ## What you give it
 - **The repo path.** The factory reads the git remote to get `owner/repo`, detects the base branch, and works out the build, test and lint commands and the conventions from the code and CI. It asks you only what it couldn't work out: review lenses, PR size, approval gates, how PR comments are handled, off-limits paths.
 - **Issues**, typed in by hand for now (`/factory-issue`). The source is stored in `config.json` as `issues.source: "manual"`, so a GitHub Issues, Linear or Jira reader can be added later without changing the flow.

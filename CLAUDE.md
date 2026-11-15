@@ -40,6 +40,9 @@ projects/<project>/
 - Never merge PRs, force-push, rebase shared branches, or delete remote branches.
 - A stage's build/review loop is capped at `review.maxRounds` (3). `stage:round` enforces it. When it says no, mark the stage needs_human.
 - The next stage starts only after the previous stage's PR is merged (`stage:start` enforces it).
-- Every comment the factory posts on a PR must end with `<!-- software-factory -->`, so the factory doesn't treat its own comments as feedback.
+- `/factory-next` holds a per-project run lock (`run:lock` / `run:unlock`) so a scheduled PR-watch run never overlaps another run. Always release it.
+- Post PR comments only with `stage:comment`. It adds the factory's signature and the `<!-- software-factory -->` marker, so the factory doesn't treat its own comments as feedback.
+- Commits get the factory identity (`identity.name`/`email`) when `stage:pr` pushes; it re-authors only commits not yet on the remote.
+- PRs that change frontend UI carry screenshots (desktop + mobile). The builder writes `stages/<n>/screenshots.json`; the orchestrator runs `stage:screenshots` and appends `screenshots.md` to the PR body. Images live on the project's `factory-screenshots` branch (append-only).
 - Give subagents absolute paths. Subagents can't launch other subagents, so all sequencing happens here.
 - Keep replies to the human short: what happened, links, and what's waiting on them.

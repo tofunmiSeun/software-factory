@@ -50,4 +50,41 @@ test('serves the board and rejects writes', async () => {
   assert.equal((await fetch(base + '/api/state', { method: 'POST' })).status, 405);
 });
 
+const post = (body, headers = {}) =>
+  fetch(base + '/api/review', { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
+const state = () => JSON.parse(fs.readFileSync(path.join(fdir, 'state.json'), 'utf8'));
+const setStatus = (status) => fs.writeFileSync(path.join(fdir, 'state.json'), JSON.stringify({ ...state(), status }));
+const target = { project: 'app', feature: '001-thing' };
+
+test('review: request changes records spec feedback and sends the spec back to drafting', async () => {
+  setStatus('awaiting_spec_approval');
+  assert.equal((await post({ ...target, gate: 'spec', decision: 'revise', text: '  ' })).status, 400, 'empty feedback');
+  const r = await post({ ...target, gate: 'spec', decision: 'revise', text: 'Cover the empty state' });
+  assert.equal(r.status, 200, await r.clone().text());
+  const s = state();
+  assert.equal(s.status, 'spec_drafting');
+  assert.deepEqual(s.feedback.map((x) => [x.gate, x.text]), [['spec', 'Cover the empty state']]);
+});
+
+test('review: approve moves spec to planning and plan to building; stale gates are refused', async () => {
+  setStatus('awaiting_spec_approval');
+  assert.equal((await post({ ...target, gate: 'spec', decision: 'approve' })).status, 200);
+  assert.equal(state().status, 'planning');
+  assert.equal((await post({ ...target, gate: 'spec', decision: 'approve' })).status, 409, 'double submit');
+  setStatus('awaiting_plan_approval');
+  assert.equal((await post({ ...target, gate: 'plan', decision: 'approve' })).status, 200);
+  assert.equal(state().status, 'building');
+});
+
+test('review: rejects cross-site, non-JSON and malformed requests', async () => {
+  setStatus('awaiting_spec_approval');
+  const ok = { ...target, gate: 'spec', decision: 'approve' };
+  assert.equal((await post(ok, { origin: 'https://evil.example' })).status, 403);
+  assert.equal((await fetch(base + '/api/review', { method: 'POST', headers: { 'content-type': 'text/plain' }, body: JSON.stringify(ok) })).status, 403);
+  assert.equal((await post({ ...ok, feature: '../x' })).status, 400);
+  assert.equal((await post({ ...ok, gate: 'stage' })).status, 400);
+  assert.equal((await post({ ...ok, feature: '999-nope' })).status, 404);
+  assert.equal(state().status, 'awaiting_spec_approval', 'nothing changed');
+});
+
 test.after(() => server.close());

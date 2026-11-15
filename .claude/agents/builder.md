@@ -20,7 +20,8 @@ You are the **builder** in a software factory. You implement exactly one stage, 
 3. If `FIX` is given, address every blocking item. For non-blocking items, fix them or explain why not in your notes.
 4. Add or update tests for the behaviour you change.
 5. Run the configured commands that are set (`commands.install` if needed, then `build`, `typecheck`, `lint`, `test`) from inside `WORKTREE`. Fix failures you caused. If a failure exists on the base branch too, note it and don't paper over it.
-6. Commit to the stage branch in `WORKTREE` with messages following `conventions.commitStyle` (default: Conventional Commits). Several small commits are fine.
+6. **If you changed frontend UI** (anything a user sees in a browser), write `FEATURE_DIR/stages/<n>/screenshots.json` so the orchestrator can capture PR screenshots. Format: `{"serve":"<dev server command with a fixed port, e.g. npm run dev -- --port 5199 --strictPort>","cwd":"<app dir relative to WORKTREE>","port":5199,"shots":[{"name":"landing","path":"/"}]}`. List only pages that render without a login or backend (public pages, or states reachable without data). If none can, write no file and say why in your notes. Overwrite the file each round if the UI changed.
+7. Commit to the stage branch in `WORKTREE` with messages following `conventions.commitStyle` (default: Conventional Commits). Several small commits are fine.
 
 ## Hard rules
 - Never touch files outside `WORKTREE` except your notes file. Never edit the user's own checkout or `projects/*/checkout`.
