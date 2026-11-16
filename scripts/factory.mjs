@@ -812,11 +812,11 @@ export function nextAction(config, state) {
     case 'spec_drafting':
       return { kind: 'agent', action: 'draft-spec', detail: 'Spec builder is drafting the spec' };
     case 'awaiting_spec_approval':
-      return { kind: 'human', action: 'approve-spec', detail: `Review spec.md, then /factory-approve ${config.name} ${state.id} [feedback]` };
+      return { kind: 'human', action: 'approve-spec', detail: `Review the spec: /factory-review ${config.name} ${state.id} [approve | feedback]` };
     case 'planning':
       return { kind: 'agent', action: 'plan', detail: 'Work planner is breaking the spec into stages' };
     case 'awaiting_plan_approval':
-      return { kind: 'human', action: 'approve-plan', detail: `Review plan.md, then /factory-approve ${config.name} ${state.id} [feedback]` };
+      return { kind: 'human', action: 'approve-plan', detail: `Review the plan: /factory-review ${config.name} ${state.id} [approve | feedback]` };
     case 'building': {
       const target = stage && ['building', 'reviewing', 'pending'].includes(stage.status) ? stage : state.stages.find((s) => ['building', 'reviewing', 'pending'].includes(s.status));
       if (!target) return { kind: 'agent', action: 'plan', detail: 'No buildable stage; check plan' };
@@ -826,7 +826,7 @@ export function nextAction(config, state) {
       return { kind: 'github', action: 'sync-pr', stage: stage?.n, detail: `Waiting for review and merge of PR #${stage?.pr?.number ?? '?'}` };
     case 'needs_human': {
       const last = [...state.history].reverse().find((h) => h.status === 'needs_human');
-      return { kind: 'human', action: 'unblock', detail: `${last?.note || 'Needs attention'} — /factory-approve ${config.name} ${state.id} <instructions>` };
+      return { kind: 'human', action: 'unblock', detail: `${last?.note || 'Needs attention'} — /factory-review ${config.name} ${state.id} <instructions>` };
     }
     default:
       return { kind: 'none', action: 'none', detail: state.status };

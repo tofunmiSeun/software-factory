@@ -89,7 +89,7 @@ function readDoc(home, project, feature, doc) {
   return fs.readFileSync(file, 'utf8');
 }
 
-// Human review gates the dashboard can answer. Each decision is the same CLI calls /factory-approve makes
+// Human review gates the dashboard can answer. Each decision is the same CLI calls /factory-review makes
 // before it launches an agent; the agent work itself happens on the next /factory-next.
 const GATES = {
   spec: { status: 'awaiting_spec_approval', approve: 'planning', revise: 'spec_drafting' },

@@ -23,7 +23,7 @@ Handle items one feature at a time, in order. For each item, act on `action`:
 | action | do |
 |---|---|
 | `draft-spec` | the spec step in `.claude/skills/factory-issue/SKILL.md` (sections 3–4). If the feature has `gate: spec` feedback (e.g. changes requested from the dashboard), pass all of it as FEEDBACK, newest last, and tell the spec-builder to revise the existing spec.md |
-| `plan` | `project:refresh <project>`, then "Approve spec" in `.claude/skills/factory-approve/SKILL.md` from launching the work-planner onward. If the feature has `gate: plan` feedback, pass all of it as FEEDBACK and tell the planner to revise plan.md |
+| `plan` | `project:refresh <project>`, then "Approve spec" in `.claude/skills/factory-review/SKILL.md` from launching the work-planner onward. If the feature has `gate: plan` feedback, pass all of it as FEEDBACK and tell the planner to revise plan.md |
 | `build-stage` | **Build loop** for `stage`, then **Open the PR** |
 | `sync-pr` | **Sync the PR** |
 | `approve-spec`, `approve-plan`, `unblock` | nothing. List it under "Waiting on you" at the end |
@@ -92,7 +92,7 @@ Stop working on this feature.
 ## Finish
 Reply with a short report:
 - **Done this run**: specs drafted, plans written, PRs opened (with links), feedback addressed, stages merged
-- **Waiting on you**: each item with the exact command (`/factory-approve ...`) or the PR link to review and merge
+- **Waiting on you**: each item with the exact command (`/factory-review ...`) or the PR link to review and merge
 - **Waiting on GitHub**: open PRs with no new feedback
 
 To run this unattended, it can be called on a schedule, e.g. `claude -p "/factory-next"` (see README).

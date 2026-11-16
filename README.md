@@ -31,8 +31,10 @@ Then in Claude Code:
 /factory-init ~/code/my-app          # register a repo; answer a few setup questions
 /factory-issue my-app Let signed-in users save their cart and come back to it later
                                       # → drafts projects/my-app/features/001-.../spec.md
-/factory-approve my-app 001          # approve the spec   (or: /factory-approve my-app 001 <feedback>)
-/factory-approve my-app 001          # approve the stage plan → builds stage 1 and opens its PR
+/factory-review my-app 001           # walks you through the spec and its open questions
+/factory-review my-app 001 approve   # approve the spec   (or: /factory-review my-app 001 <feedback>)
+/factory-review my-app 001           # walks you through the stage plan
+/factory-review my-app 001 approve   # approve the plan → builds stage 1 and opens its PR
 # …review & merge the PR on GitHub…
 /factory-next                        # sees the merge, builds the next stage, handles PR comments
 /factory-status                      # what's going on, what's waiting on you
@@ -71,7 +73,7 @@ projects/<project>/
 Your own clone of the target repo is never modified. The factory adds git worktrees to it, and those live under `projects/`.
 
 ### Rules the factory enforces
-- Build ⇄ review is capped at **3 rounds** per stage (`review.maxRounds`). After that, the stage is marked **needs you**. Unblock it with `/factory-approve <project> <feature> <guidance>`.
+- Build ⇄ review is capped at **3 rounds** per stage (`review.maxRounds`). After that, the stage is marked **needs you**. Unblock it with `/factory-review <project> <feature> <guidance>`.
 - **The next stage starts only after the previous PR is merged.** It branches from the updated base.
 - The factory never merges, force-pushes or rebases shared branches. Its own PR comments carry a hidden marker so they're never mistaken for your feedback.
 
