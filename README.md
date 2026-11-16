@@ -19,7 +19,8 @@ You: issue ─► spec-builder ─► YOU approve spec ─► work-planner ─�
 ## Requirements
 - [Claude Code](https://docs.claude.com/en/docs/claude-code)
 - Node.js 20+ and git
-- [GitHub CLI](https://cli.github.com/) logged in (`gh auth login`). PR automation is GitHub-only for now.
+- For a repo on **GitHub**: the [GitHub CLI](https://cli.github.com/), logged in (`gh auth login`).
+- For a repo on **GitLab** (gitlab.com or self-hosted): the [GitLab CLI](https://gitlab.com/gitlab-org/cli), logged in (`glab auth login`). The factory opens merge requests (MRs) there; everything this README says about PRs applies to MRs.
 
 ## Quick start
 ```bash
@@ -35,29 +36,29 @@ Then in Claude Code:
 /factory-review my-app 001 approve   # approve the spec   (or: /factory-review my-app 001 <feedback>)
 /factory-review my-app 001           # walks you through the stage plan
 /factory-review my-app 001 approve   # approve the plan → builds stage 1 and opens its PR
-# …review & merge the PR on GitHub…
+# …review & merge the PR on GitHub (or the MR on GitLab)…
 /factory-next                        # sees the merge, builds the next stage, handles PR comments
 /factory-status                      # what's going on, what's waiting on you
 ```
 In a second terminal, run the dashboard: `npm run dashboard` → http://localhost:4317
 
-During `/factory-init` you can turn on the **PR watcher**: a scheduled task (in the Claude desktop app) that checks the factory's open PRs every 15/30/60 minutes with `gh` (`node scripts/factory.mjs watch:check <project>`). When a PR gets a review or comment, or merges, it runs `/factory-next` for you, so the builder addresses the review and the next stage starts. It runs only while the desktop app is open.
+During `/factory-init` you can turn on the **PR watcher**: a scheduled task (in the Claude desktop app) that checks the factory's open PRs every 15/30/60 minutes with `gh` or `glab` (`node scripts/factory.mjs watch:check <project>`). When a PR gets a review or comment, or merges, it runs `/factory-next` for you, so the builder addresses the review and the next stage starts. It runs only while the desktop app is open.
 
 You can review specs and plans from the dashboard: open a feature that is waiting on you, read the spec (or plan), then **Approve** or **Request changes**. The dashboard records your decision; run `/factory-next` in Claude Code to start the next step.
 
 ## What you give it
-- **The repo path.** The factory reads the git remote to get `owner/repo`, detects the base branch, and works out the build, test and lint commands and the conventions from the code and CI. It asks you only what it couldn't work out: review lenses, PR size, approval gates, how PR comments are handled, off-limits paths.
+- **The repo path.** The factory reads the git remote to get `owner/repo` and whether it's on GitHub or GitLab, detects the base branch, and works out the build, test and lint commands and the conventions from the code and CI. It asks you only what it couldn't work out: review lenses, PR size, approval gates, how PR comments are handled, off-limits paths.
 - **Issues**, typed in by hand for now (`/factory-issue`). The source is stored in `config.json` as `issues.source: "manual"`, so a GitHub Issues, Linear or Jira reader can be added later without changing the flow.
 
 ## How it works
 | Piece | Where |
 |---|---|
 | Orchestrator rules | `CLAUDE.md` |
-| Slash commands | `.claude/skills/factory-{init,issue,approve,next,status}/SKILL.md` |
+| Slash commands | `.claude/skills/factory-{init,issue,review,next,status}/SKILL.md` |
 | Subagents | `.claude/agents/{spec-builder,work-planner,builder,reviewer}.md` |
 | State CLI (all transitions, worktrees, PRs) | `scripts/factory.mjs` (run with no args for help) |
 | Dashboard | `dashboard/` (zero-dependency Node server + one HTML page) |
-| Permissions | `.claude/settings.json` (edits auto-accepted inside the factory folder; force-push and `gh pr merge` denied) |
+| Permissions | `.claude/settings.json` (edits auto-accepted inside the factory folder; force-push, `gh pr merge` and `glab mr merge` denied) |
 
 ### State: one folder per project (gitignored)
 ```
@@ -92,6 +93,6 @@ Headless runs can't answer permission prompts. During `/factory-init`, say yes t
 
 ## Development
 ```bash
-npm test                 # CLI end-to-end (local bare remote + fake gh) and dashboard API tests
+npm test                 # CLI end-to-end (local bare remote + fake gh / glab) and dashboard API tests
 npm run status
 ```

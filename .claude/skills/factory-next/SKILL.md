@@ -8,6 +8,8 @@ argument-hint: "[project] [feature]"
 
 Arguments: `$ARGUMENTS` (optional project and/or feature to limit the run)
 
+Projects can live on GitHub or GitLab (`repo.forge` in config.json). On GitLab a PR is a **merge request (MR)**, numbered `!12` instead of `#12`. The `stage:*` commands handle both, so the steps below are the same. Say "MR" to the user for GitLab projects.
+
 For each project you will work on, take its run lock first, so a scheduled PR-watch run and a manual run never work on the same feature at once:
 ```
 node scripts/factory.mjs run:lock <project>
@@ -86,13 +88,13 @@ Stop working on this feature.
     3. `stage:start <project> <feature> <n>` to make sure the worktree exists. It resumes the existing one.
     4. Builder with FIX = that file. Then the reviewer. If it FAILs, run the builder once more with the review, then review again. Don't run more than two builder passes per PR round.
     5. `stage:pr` again, with the same title and body file. This pushes the new commits to the open PR.
-    6. Reply on the PR: write a file listing each feedback item and what changed, then `node scripts/factory.mjs stage:comment <project> <feature> <n> --body-file <file>`. It adds the factory's signature and the `<!-- software-factory -->` marker. Don't post with `gh pr comment` directly.
+    6. Reply on the PR: write a file listing each feedback item and what changed, then `node scripts/factory.mjs stage:comment <project> <feature> <n> --body-file <file>`. It adds the factory's signature and the `<!-- software-factory -->` marker. Don't post with `gh pr comment` or `glab mr note` directly.
     7. `stage:update ... --json '{"status":"pr_open","lastFeedbackAt":"<latestFeedbackAt from the sync>"}'` and `feature:status ... awaiting_merge`.
 
 ## Finish
 Reply with a short report:
 - **Done this run**: specs drafted, plans written, PRs opened (with links), feedback addressed, stages merged
 - **Waiting on you**: each item with the exact command (`/factory-review ...`) or the PR link to review and merge
-- **Waiting on GitHub**: open PRs with no new feedback
+- **Waiting on GitHub / GitLab**: open PRs and MRs with no new feedback
 
 To run this unattended, it can be called on a schedule, e.g. `claude -p "/factory-next"` (see README).

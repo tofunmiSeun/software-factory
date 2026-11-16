@@ -217,11 +217,11 @@ function withDefaults(config) {
   return config;
 }
 
-function defaultConfig({ name, repoPath, remote, remoteUrl, host, slug, baseBranch }) {
+function defaultConfig({ name, repoPath, remote, remoteUrl, host, slug, baseBranch, forge }) {
   return withDefaults({
     name,
     createdAt: now(),
-    repo: { path: repoPath, remote, remoteUrl, host, slug, baseBranch },
+    repo: { path: repoPath, remote, remoteUrl, host, slug, baseBranch, forge },
     issues: { source: 'manual' },
     commands: { install: null, build: null, test: null, lint: null, typecheck: null, run: null },
     conventions: { docs: [], branchPrefix: 'factory/', commitStyle: null, prTemplate: null },
@@ -247,7 +247,8 @@ function defaultConfig({ name, repoPath, remote, remoteUrl, host, slug, baseBran
 const commands = {};
 
 commands['project:create'] = ({ positional: [repoArg], flags }) => {
-  if (!repoArg) die('usage: project:create <repo-path> [--name <slug>] [--remote <name>] [--force]');
+  if (!repoArg) die('usage: project:create <repo-path> [--name <slug>] [--remote <name>] [--base <branch>] [--forge github|gitlab] [--force]');
+  if (flags.forge !== undefined && !FORGES.includes(flags.forge)) die(`--forge must be one of: ${FORGES.join(', ')}`);
   const input = path.resolve(repoArg.replace(/^~(?=$|\/)/, process.env.HOME || '~'));
   if (!fs.existsSync(input)) die(`path does not exist: ${input}`);
   const repoPath = tryGit(input, 'rev-parse', '--show-toplevel');
@@ -268,10 +269,11 @@ commands['project:create'] = ({ positional: [repoArg], flags }) => {
   const fetched = tryGit(repoPath, 'fetch', '--quiet', remote) !== null;
   const baseBranch = flags.base || detectBaseBranch(repoPath, remote);
 
-  const config = fs.existsSync(configFile(name))
-    ? { ...readJSON(configFile(name)) }
-    : defaultConfig({ name, repoPath, remote, remoteUrl, host, slug, baseBranch });
-  config.repo = { path: repoPath, remote, remoteUrl, host, slug, baseBranch };
+  const existing = fs.existsSync(configFile(name)) ? readJSON(configFile(name)) : null;
+  // GitHub or GitLab, from the host; --forge names it for a self-hosted GitLab, and a re-detect keeps an earlier --forge.
+  const forge = flags.forge || (existing?.repo?.host === host ? existing.repo.forge : null) || detectForge(host);
+  const config = existing ? { ...existing } : defaultConfig({ name, repoPath, remote, remoteUrl, host, slug, baseBranch, forge });
+  config.repo = { path: repoPath, remote, remoteUrl, host, slug, baseBranch, forge };
 
   fs.mkdirSync(path.join(dir, 'features'), { recursive: true });
   fs.mkdirSync(path.join(dir, 'worktrees'), { recursive: true });
@@ -484,13 +486,110 @@ commands['stage:round'] = ({ positional: [p, f, n], flags }) => {
   out({ allowed: true, round: stage[field], max, kind: field });
 };
 
-function requireGitHub(config) {
-  if (config.repo.host !== 'github.com' && !process.env.FACTORY_ALLOW_ANY_HOST)
-    die(`PR automation currently supports GitHub only (remote host: ${config.repo.host ?? 'unknown'})`);
-  if (!config.repo.slug) die('could not work out owner/repo from the remote URL');
+// ---------- code hosts ----------
+// PRs live on GitHub (through `gh`) or GitLab (merge requests, through `glab api`).
+// Everything below returns the same shapes, so the commands don't care which host it is:
+//   pr: { number, url, state: 'OPEN' | 'MERGED' | 'CLOSED', mergedAt, reviewDecision }
+//   feedback item: { kind: 'review' | 'comment' | 'inline', author, at, body, state?, path?, line? }
+
+export const FORGES = ['github', 'gitlab'];
+export function detectForge(host) {
+  if (!host) return null;
+  if (host === 'github.com') return 'github';
+  if (host === 'gitlab.com' || /(^|\.)gitlab\./i.test(host)) return 'gitlab';
+  return null;
+}
+const forgeName = (config) => config.repo.forge ?? detectForge(config.repo.host);
+function requireForge(config) {
+  const forge = forgeName(config);
+  if (!FORGES.includes(forge))
+    die(`can't tell whether ${config.repo.host ?? 'this remote'} is GitHub or GitLab; re-run project:create <repo> --force --forge github|gitlab`);
+  if (!config.repo.slug) die('could not work out the repository path from the remote URL');
+  return forge;
+}
+// How the host names a PR: "PR #12" on GitHub, "MR !12" on GitLab.
+const prRef = (config, number) => (forgeName(config) === 'gitlab' ? `MR !${number}` : `PR #${number}`);
+
+const glabProject = (config) => `projects/${encodeURIComponent(config.repo.slug)}`;
+function glab(config, endpoint, args = []) {
+  const text = run('glab', ['api', '--hostname', config.repo.host, ...args, endpoint]);
+  return text ? JSON.parse(text) : null;
+}
+// glab sends an --input file as the JSON request body.
+function glabWrite(config, method, endpoint, body) {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'factory-glab-')), 'body.json');
+  fs.writeFileSync(file, JSON.stringify(body));
+  try {
+    return glab(config, endpoint, ['--method', method, '--input', file]);
+  } finally {
+    fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  }
+}
+const GITLAB_STATES = { opened: 'OPEN', locked: 'OPEN', merged: 'MERGED', closed: 'CLOSED' };
+const fromGitlabMr = (mr) => ({ number: mr.iid, url: mr.web_url, state: GITLAB_STATES[mr.state] ?? 'OPEN', mergedAt: mr.merged_at ?? null, reviewDecision: null });
+
+// The open PR for a branch, or null.
+function findOpenPr(config, branch) {
+  if (requireForge(config) === 'gitlab') {
+    const list = glab(config, `${glabProject(config)}/merge_requests?state=opened&source_branch=${encodeURIComponent(branch)}`) || [];
+    return list.length ? fromGitlabMr(list[0]) : null;
+  }
+  const pr = JSON.parse(tryRun('gh', ['pr', 'view', branch, '--repo', config.repo.slug, '--json', 'number,url,state']) || 'null');
+  return pr && pr.state === 'OPEN' ? pr : null;
+}
+
+function createPr(config, { branch, title, bodyFile, cwd }) {
+  if (requireForge(config) === 'gitlab') {
+    const mr = glabWrite(config, 'POST', `${glabProject(config)}/merge_requests`, {
+      source_branch: branch,
+      target_branch: config.repo.baseBranch,
+      title,
+      description: fs.readFileSync(bodyFile, 'utf8'),
+    });
+    return fromGitlabMr(mr);
+  }
+  const repoArgs = ['--repo', config.repo.slug];
+  run('gh', ['pr', 'create', ...repoArgs, '--base', config.repo.baseBranch, '--head', branch, '--title', title, '--body-file', bodyFile], { cwd });
+  return JSON.parse(run('gh', ['pr', 'view', branch, ...repoArgs, '--json', 'number,url,state']));
+}
+
+function commentOnPr(config, number, bodyFile) {
+  if (requireForge(config) === 'gitlab') {
+    glabWrite(config, 'POST', `${glabProject(config)}/merge_requests/${number}/notes`, { body: fs.readFileSync(bodyFile, 'utf8') });
+    return;
+  }
+  run('gh', ['pr', 'comment', String(number), '--repo', config.repo.slug, '--body-file', bodyFile]);
+}
+
+// A PR's state plus every comment on it, before filtering.
+function readPr(config, number) {
+  if (requireForge(config) === 'gitlab') {
+    const mr = fromGitlabMr(glab(config, `${glabProject(config)}/merge_requests/${number}`));
+    if (mr.state !== 'OPEN') return { pr: mr, items: [] };
+    const notes = glab(config, `${glabProject(config)}/merge_requests/${number}/notes?sort=asc&per_page=100`, ['--paginate']) || [];
+    const items = notes
+      .filter((n) => !n.system)
+      .map((n) =>
+        n.type === 'DiffNote'
+          ? { kind: 'inline', author: n.author?.username, at: n.created_at, path: n.position?.new_path ?? n.position?.old_path, line: n.position?.new_line ?? n.position?.old_line, body: n.body }
+          : { kind: 'comment', author: n.author?.username, at: n.created_at, body: n.body }
+      );
+    return { pr: mr, items };
+  }
+  const pr = JSON.parse(run('gh', ['pr', 'view', String(number), '--repo', config.repo.slug, '--json', 'state,mergedAt,reviewDecision,reviews,comments,url']));
+  if (pr.state !== 'OPEN') return { pr, items: [] };
+  const items = [];
+  for (const r of pr.reviews || []) {
+    if (r.body?.trim() || r.state === 'CHANGES_REQUESTED') items.push({ kind: 'review', state: r.state, author: r.author?.login, at: r.submittedAt, body: r.body });
+  }
+  for (const c of pr.comments || []) items.push({ kind: 'comment', author: c.author?.login, at: c.createdAt, body: c.body });
+  const inline = JSON.parse(tryRun('gh', ['api', `repos/${config.repo.slug}/pulls/${number}/comments`, '--paginate']) || '[]');
+  for (const c of inline) items.push({ kind: 'inline', author: c.user?.login, at: c.created_at, path: c.path, line: c.line ?? c.original_line, body: c.body });
+  return { pr, items };
 }
 
 // The factory's commit identity, if configured. Env vars win over git config and over any GIT_AUTHOR_* already set.
+// PRs and comments still go out as whoever gh / glab is logged in as.
 function identityEnv(config) {
   const { name, email } = config.identity || {};
   if (!name || !email) return null;
@@ -523,7 +622,7 @@ function applyIdentity(config, stage) {
 // Push the stage branch and open (or reuse) its pull request.
 commands['stage:pr'] = ({ positional: [p, f, n], flags }) => {
   const config = loadConfig(p);
-  requireGitHub(config);
+  requireForge(config);
   const state = loadState(p, f);
   const stage = getStage(state, n);
   if (!stage.worktree || !fs.existsSync(stage.worktree)) die('stage has no worktree');
@@ -533,31 +632,30 @@ commands['stage:pr'] = ({ positional: [p, f, n], flags }) => {
 
   const reauthored = applyIdentity(config, stage);
   git(stage.worktree, 'push', '--quiet', '-u', config.repo.remote, `HEAD:refs/heads/${stage.branch}`);
-  const repoArgs = ['--repo', config.repo.slug];
-  let pr = JSON.parse(tryRun('gh', ['pr', 'view', stage.branch, ...repoArgs, '--json', 'number,url,state']) || 'null');
-  if (!pr || pr.state !== 'OPEN') {
+  let pr = findOpenPr(config, stage.branch);
+  if (!pr) {
     const body = fs.readFileSync(path.resolve(flags['body-file']), 'utf8');
     const bodyFile = path.join(featureDir(p, f), 'stages', String(n), 'pr-body.md');
     fs.mkdirSync(path.dirname(bodyFile), { recursive: true });
     const sig = config.identity?.signature ? `\n\n---\n_${config.identity.signature}_` : '';
     fs.writeFileSync(bodyFile, `${body.trim()}${sig}\n\n${PR_MARKER}\n`);
-    run('gh', ['pr', 'create', ...repoArgs, '--base', config.repo.baseBranch, '--head', stage.branch, '--title', flags.title, '--body-file', bodyFile], { cwd: stage.worktree });
-    pr = JSON.parse(run('gh', ['pr', 'view', stage.branch, ...repoArgs, '--json', 'number,url,state']));
+    pr = createPr(config, { branch: stage.branch, title: flags.title, bodyFile, cwd: stage.worktree });
   }
-  stage.pr = { number: pr.number, url: pr.url, openedAt: stage.pr?.openedAt || now() };
+  const ref = prRef(config, pr.number);
+  stage.pr = { number: pr.number, url: pr.url, ref, openedAt: stage.pr?.openedAt || now() };
   stage.status = 'pr_open';
   stage.lastFeedbackAt ||= now();
   state.status = 'awaiting_merge';
-  state.history.push({ at: now(), status: 'awaiting_merge', note: `stage ${n} PR #${pr.number}` });
+  state.history.push({ at: now(), status: 'awaiting_merge', note: `stage ${n} ${ref}` });
   saveState(p, f, state);
-  logEvent(p, f, 'stage.pr', `stage ${n} PR #${pr.number} ${pr.url}`);
+  logEvent(p, f, 'stage.pr', `stage ${n} ${ref} ${pr.url}`);
   out({ ...stage, reauthored });
 };
 
 // Post a factory comment on a stage's PR: signature on top, marker at the end so the factory ignores it later.
 commands['stage:comment'] = ({ positional: [p, f, n], flags }) => {
   const config = loadConfig(p);
-  requireGitHub(config);
+  requireForge(config);
   const stage = getStage(loadState(p, f), n);
   if (!stage.pr) die(`stage ${stage.n} has no PR`);
   if (typeof flags['body-file'] !== 'string') die('usage: stage:comment <project> <feature> <n> --body-file <path>');
@@ -566,12 +664,12 @@ commands['stage:comment'] = ({ positional: [p, f, n], flags }) => {
   const sig = config.identity?.signature ? `**${config.identity.signature}**\n\n` : '';
   const file = path.join(featureDir(p, f), 'stages', String(stage.n), `comment-${Date.now()}.md`);
   fs.writeFileSync(file, `${sig}${body}\n\n${PR_MARKER}\n`);
-  run('gh', ['pr', 'comment', String(stage.pr.number), '--repo', config.repo.slug, '--body-file', file]);
-  logEvent(p, f, 'stage.comment', `stage ${stage.n} PR #${stage.pr.number}: comment posted`);
+  commentOnPr(config, stage.pr.number, file);
+  logEvent(p, f, 'stage.comment', `stage ${stage.n} ${prRef(config, stage.pr.number)}: comment posted`);
   out({ posted: true, pr: stage.pr.number, file });
 };
 
-// Capture screenshots of a stage's UI and publish them to the factory-screenshots branch.
+// Capture screenshots of a stage's UI and publish them: on GitHub to the factory-screenshots branch, on GitLab as project uploads.
 // Reads stages/<n>/screenshots.json (written by the builder):
 //   { "serve": "npm run dev -- --port 5199 --strictPort", "cwd": "business-ui", "port": 5199,
 //     "shots": [{ "name": "landing", "path": "/" }] }
@@ -580,7 +678,7 @@ const SCREENSHOT_BRANCH = 'factory-screenshots';
 const CHROME = process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 commands['stage:screenshots'] = ({ positional: [p, f, n] }) => {
   const config = loadConfig(p);
-  requireGitHub(config);
+  const forge = requireForge(config);
   const state = loadState(p, f);
   const stage = getStage(state, n);
   if (!stage.worktree || !fs.existsSync(stage.worktree)) die('stage has no worktree');
@@ -623,21 +721,8 @@ commands['stage:screenshots'] = ({ positional: [p, f, n] }) => {
     try { process.kill(-server.pid); } catch {}
   }
 
-  // Publish to an orphan branch (never force-pushed; history is only appended to).
-  const repo = path.join(tmp, 'repo');
-  fs.mkdirSync(repo);
-  git(repo, 'init', '--quiet');
-  git(repo, 'remote', 'add', 'origin', config.repo.remoteUrl);
-  if (tryGit(repo, 'fetch', '--quiet', '--depth', '1', 'origin', SCREENSHOT_BRANCH) !== null) git(repo, 'checkout', '--quiet', '-B', SCREENSHOT_BRANCH, 'FETCH_HEAD');
-  else git(repo, 'checkout', '--quiet', '--orphan', SCREENSHOT_BRANCH);
-  const dir = `${f}/s${n}/${Date.now()}`;
-  fs.mkdirSync(path.join(repo, dir), { recursive: true });
-  for (const x of files) fs.copyFileSync(path.join(tmp, x.name), path.join(repo, dir, x.name));
-  git(repo, 'add', '-A');
-  git(repo, '-c', 'user.name=software-factory', '-c', 'user.email=software-factory@users.noreply.github.com', 'commit', '--quiet', '-m', `screenshots for ${f} stage ${n}`);
-  git(repo, 'push', '--quiet', 'origin', `HEAD:refs/heads/${SCREENSHOT_BRANCH}`);
-
-  const url = (x) => `https://github.com/${config.repo.slug}/blob/${SCREENSHOT_BRANCH}/${dir}/${x.name}?raw=true`;
+  const urls = forge === 'gitlab' ? uploadToGitlab(config, tmp, files) : publishToGithubBranch(config, tmp, files, `${f}/s${n}/${Date.now()}`);
+  const url = (x) => urls[x.name];
   const md = ['## Screenshots', ''];
   for (const shot of spec.shots) {
     md.push(`**${shot.name}** (\`${shot.path || '/'}\`)`, '');
@@ -652,30 +737,41 @@ commands['stage:screenshots'] = ({ positional: [p, f, n] }) => {
   out({ markdownFile: mdFile, count: files.length });
 };
 
+// GitHub: commit the images to an orphan branch (never force-pushed; history is only appended to) and link to them.
+function publishToGithubBranch(config, tmp, files, dir) {
+  const repo = path.join(tmp, 'repo');
+  fs.mkdirSync(repo);
+  git(repo, 'init', '--quiet');
+  git(repo, 'remote', 'add', 'origin', config.repo.remoteUrl);
+  if (tryGit(repo, 'fetch', '--quiet', '--depth', '1', 'origin', SCREENSHOT_BRANCH) !== null) git(repo, 'checkout', '--quiet', '-B', SCREENSHOT_BRANCH, 'FETCH_HEAD');
+  else git(repo, 'checkout', '--quiet', '--orphan', SCREENSHOT_BRANCH);
+  fs.mkdirSync(path.join(repo, dir), { recursive: true });
+  for (const x of files) fs.copyFileSync(path.join(tmp, x.name), path.join(repo, dir, x.name));
+  git(repo, 'add', '-A');
+  git(repo, '-c', 'user.name=software-factory', '-c', 'user.email=software-factory@users.noreply.github.com', 'commit', '--quiet', '-m', `screenshots: ${dir}`);
+  git(repo, 'push', '--quiet', 'origin', `HEAD:refs/heads/${SCREENSHOT_BRANCH}`);
+  return Object.fromEntries(files.map((x) => [x.name, `https://github.com/${config.repo.slug}/blob/${SCREENSHOT_BRANCH}/${dir}/${x.name}?raw=true`]));
+}
+
+// GitLab: upload each image to the project. Upload links work in merge requests on private projects too,
+// for anyone who can see the project; a link to a file on a branch would not render there.
+function uploadToGitlab(config, tmp, files) {
+  const urls = {};
+  for (const x of files) {
+    const up = glab(config, `${glabProject(config)}/uploads`, ['--method', 'POST', '--form', `file=@${path.join(tmp, x.name)}`]);
+    urls[x.name] = `https://${config.repo.host}/${config.repo.slug}${up.url}`;
+  }
+  return urls;
+}
+
 // Read a stage's PR and the human feedback on it newer than lastFeedbackAt (the factory's own comments excluded).
 // Read-only: shared by stage:sync (which acts on it) and watch:check (which only reports it).
 function prActivity(config, stage) {
-  const pr = JSON.parse(
-    run('gh', ['pr', 'view', String(stage.pr.number), '--repo', config.repo.slug, '--json', 'state,mergedAt,reviewDecision,reviews,comments,url'])
-  );
-  const feedback = [];
-  if (pr.state !== 'OPEN') return { pr, feedback };
+  const { pr, items } = readPr(config, stage.pr.number);
   const since = stage.lastFeedbackAt ? Date.parse(stage.lastFeedbackAt) : 0;
-  const notOurs = (body) => !String(body || '').includes(PR_MARKER);
-  for (const r of pr.reviews || []) {
-    const at = r.submittedAt;
-    if (Date.parse(at) > since && notOurs(r.body) && (r.body?.trim() || r.state === 'CHANGES_REQUESTED'))
-      feedback.push({ kind: 'review', state: r.state, author: r.author?.login, at, body: r.body });
-  }
-  for (const c of pr.comments || []) {
-    if (Date.parse(c.createdAt) > since && notOurs(c.body)) feedback.push({ kind: 'comment', author: c.author?.login, at: c.createdAt, body: c.body });
-  }
-  const inline = JSON.parse(tryRun('gh', ['api', `repos/${config.repo.slug}/pulls/${stage.pr.number}/comments`, '--paginate']) || '[]');
-  for (const c of inline) {
-    if (Date.parse(c.created_at) > since && notOurs(c.body))
-      feedback.push({ kind: 'inline', author: c.user?.login, at: c.created_at, path: c.path, line: c.line ?? c.original_line, body: c.body });
-  }
-  feedback.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  const feedback = items
+    .filter((x) => Date.parse(x.at) > since && !String(x.body || '').includes(PR_MARKER))
+    .sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
   return { pr, feedback };
 }
 
@@ -683,7 +779,7 @@ function prActivity(config, stage) {
 // Open → report review feedback newer than lastFeedbackAt, excluding the factory's own comments.
 commands['stage:sync'] = ({ positional: [p, f, nArg] }) => {
   const config = loadConfig(p);
-  requireGitHub(config);
+  requireForge(config);
   const state = loadState(p, f);
   const stage = getStage(state, nArg ?? state.currentStage);
   if (!stage.pr) die(`stage ${stage.n} has no PR`);
@@ -748,22 +844,23 @@ commands['watch:check'] = ({ positional: [only] }) => {
       const state = loadState(p, f);
       const next = nextAction(config, state);
       if (next.kind === 'agent') items.push({ project: p, feature: f, reason: next.action, detail: next.detail });
-      if (next.kind !== 'github') continue;
+      if (next.kind !== 'host') continue;
       const stage = state.stages.find((s) => s.n === state.currentStage);
       if (!stage?.pr) continue;
+      const ref = prRef(config, stage.pr.number);
       let activity;
       try {
-        requireGitHub(config);
+        requireForge(config);
         activity = prActivity(config, stage);
       } catch (err) {
-        items.push({ project: p, feature: f, reason: 'error', detail: `PR #${stage.pr.number}: ${err.message}` });
+        items.push({ project: p, feature: f, reason: 'error', detail: `${ref}: ${err.message}` });
         continue;
       }
       const { pr, feedback } = activity;
-      if (pr.state === 'MERGED') items.push({ project: p, feature: f, reason: 'merged', detail: `PR #${stage.pr.number} merged` });
-      else if (pr.state === 'CLOSED') items.push({ project: p, feature: f, reason: 'closed', detail: `PR #${stage.pr.number} closed without merge` });
+      if (pr.state === 'MERGED') items.push({ project: p, feature: f, reason: 'merged', detail: `${ref} merged` });
+      else if (pr.state === 'CLOSED') items.push({ project: p, feature: f, reason: 'closed', detail: `${ref} closed without merge` });
       else if (feedback.length)
-        items.push({ project: p, feature: f, reason: 'review', detail: `PR #${stage.pr.number}: ${feedback.length} new review item(s) from ${[...new Set(feedback.map((x) => x.author).filter(Boolean))].join(', ') || 'someone'}` });
+        items.push({ project: p, feature: f, reason: 'review', detail: `${ref}: ${feedback.length} new review item(s) from ${[...new Set(feedback.map((x) => x.author).filter(Boolean))].join(', ') || 'someone'}` });
     }
   }
   const lock = only ? readLock(only) : null;
@@ -805,7 +902,7 @@ commands['event'] = ({ positional: [p, f, type, ...msg] }) => {
   out({ ok: true });
 };
 
-// What should happen next for every active feature. kind: agent (factory acts), human (waiting on you), github (waiting on PR).
+// What should happen next for every active feature. kind: agent (factory acts), human (waiting on you), host (waiting on the PR/MR on GitHub or GitLab).
 export function nextAction(config, state) {
   const stage = state.currentStage ? state.stages.find((s) => s.n === state.currentStage) : null;
   switch (state.status) {
@@ -823,7 +920,7 @@ export function nextAction(config, state) {
       return { kind: 'agent', action: 'build-stage', stage: target.n, detail: `Building and reviewing stage ${target.n}: ${target.title}` };
     }
     case 'awaiting_merge':
-      return { kind: 'github', action: 'sync-pr', stage: stage?.n, detail: `Waiting for review and merge of PR #${stage?.pr?.number ?? '?'}` };
+      return { kind: 'host', action: 'sync-pr', stage: stage?.n, detail: `Waiting for review and merge of ${stage?.pr ? prRef(config, stage.pr.number) : 'the PR'}` };
     case 'needs_human': {
       const last = [...state.history].reverse().find((h) => h.status === 'needs_human');
       return { kind: 'human', action: 'unblock', detail: `${last?.note || 'Needs attention'} — /factory-review ${config.name} ${state.id} <instructions>` };
@@ -859,7 +956,7 @@ commands['status'] = ({ flags }) => {
           id: f,
           title: s.title,
           status: s.status,
-          stages: s.stages.map((st) => `${st.n}:${st.status}${st.pr ? `#${st.pr.number}` : ''}`).join(' '),
+          stages: s.stages.map((st) => `${st.n}:${st.status}${st.pr ? (forgeName(config) === 'gitlab' ? `!${st.pr.number}` : `#${st.pr.number}`) : ''}`).join(' '),
           next: nextAction(config, s).detail,
         };
       }),
@@ -882,7 +979,7 @@ commands['status'] = ({ flags }) => {
 function usage() {
   return `Software Factory state CLI
 
-  project:create <repo-path> [--name slug] [--remote name] [--base branch] [--force]
+  project:create <repo-path> [--name slug] [--remote name] [--base branch] [--forge github|gitlab] [--force]
   project:refresh <project>              update the read-only checkout to latest base
   project:list | project:get <project>
   config:set <project> <dotted.key> <value>
@@ -897,13 +994,13 @@ function usage() {
   stage:round <project> <feature> <n> [--kind review|pr]
   stage:update <project> <feature> <n> --json '{...}'
   stage:screenshots <project> <feature> <n>   capture + publish UI screenshots, writes stages/<n>/screenshots.md
-  stage:pr <project> <feature> <n> --title "<title>" --body-file <path>
-  stage:sync <project> <feature> [n]     check PR: merged / closed / new feedback
-  stage:comment <project> <feature> <n> --body-file <path>   reply on the PR (adds signature + marker)
+  stage:pr <project> <feature> <n> --title "<title>" --body-file <path>   push and open the PR (GitHub) or MR (GitLab)
+  stage:sync <project> <feature> [n]     check the PR/MR: merged / closed / new feedback
+  stage:comment <project> <feature> <n> --body-file <path>   reply on the PR/MR (adds signature + marker)
 
   event <project> <feature|-> <type> <message>
   next [project]                         next action for every active feature
-  watch:check [project]                  anything for /factory-next to do? (checks PRs, changes nothing)
+  watch:check [project]                  anything for /factory-next to do? (checks PRs/MRs, changes nothing)
   run:lock <project> [--by who] [--force] | run:unlock <project>
   status [--json]`;
 }

@@ -16,14 +16,19 @@
       "Bash(gh auth status:*)",
       "Bash(gh repo view:*)",
       "Bash(gh pr view:*)",
-      "Bash(gh pr comment:*)"
+      "Bash(gh pr comment:*)",
+      "Bash(glab auth status:*)",
+      "Bash(glab repo view:*)",
+      "Bash(glab mr view:*)"
     ],
     "deny": [
       "Bash(git push --force:*)",
       "Bash(git push -f:*)",
       "Bash(git push --force-with-lease:*)",
       "Bash(gh pr merge:*)",
-      "Bash(gh repo delete:*)"
+      "Bash(gh repo delete:*)",
+      "Bash(glab mr merge:*)",
+      "Bash(glab repo delete:*)"
     ]
   }
 }
