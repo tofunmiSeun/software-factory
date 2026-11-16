@@ -28,7 +28,7 @@
   .stat.hot { background: var(--accent-soft); color: var(--accent); }
   .stat.hot b { color: var(--accent); }
   .updated { font-size: 12px; color: var(--muted); font-family: var(--mono); }
-  .layout { display: grid; grid-template-columns: 1fr 300px; min-height: calc(100vh - 58px); }
+  .layout { min-height: calc(100vh - 58px); }
   main { overflow-x: auto; padding: 18px 22px; }
   .board { display: grid; grid-template-columns: repeat(6, minmax(190px, 1fr)); gap: 12px; min-width: 1200px; }
   .col h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; display: flex; justify-content: space-between; }
@@ -47,8 +47,18 @@
   .next { font-size: 12px; color: var(--muted); }
   a { color: inherit; }
   .pr { font-family: var(--mono); font-size: 12px; }
-  aside.activity { border-left: 1px solid var(--line); background: var(--panel); padding: 16px; overflow-y: auto; max-height: calc(100vh - 58px); position: sticky; top: 58px; }
-  aside h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; }
+  /* activity log: a drawer that slides over the board from the right */
+  aside.activity { position: fixed; top: 0; right: 0; bottom: 0; width: min(380px, 100vw); z-index: 9; background: var(--panel); border-left: 1px solid var(--line); box-shadow: -10px 0 30px rgba(0,0,0,.12); transform: translateX(105%); transition: transform .18s; display: flex; flex-direction: column; visibility: hidden; }
+  aside.activity.open { transform: none; visibility: visible; }
+  aside .a-head { display: flex; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  aside h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0; }
+  aside #events { overflow-y: auto; padding: 4px 16px 24px; }
+  .iconbtn { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); cursor: pointer; padding: 0; flex: none; }
+  .iconbtn:hover { background: var(--chip); }
+  .iconbtn[aria-expanded="true"] { background: var(--ink); color: var(--panel); border-color: var(--ink); }
+  .iconbtn svg { width: 16px; height: 16px; }
+  aside .iconbtn { margin-left: auto; border-color: transparent; }
+  @media (prefers-reduced-motion: reduce) { aside.activity, .drawer { transition: none; } }
   .ev { padding: 7px 0; border-bottom: 1px dashed var(--line); font-size: 12.5px; }
   .ev .t { font-family: var(--mono); font-size: 11px; color: var(--muted); }
   .ev .k { font-family: var(--mono); font-size: 11px; color: var(--accent); }
@@ -82,7 +92,7 @@
   .btn { font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
   .btn:disabled { opacity: .55; cursor: default; }
-  @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } aside.activity { position: static; max-height: none; border-left: 0; border-top: 1px solid var(--line); } }
+
 </style>
 </head>
 <body>
@@ -91,10 +101,11 @@
   <select id="project" aria-label="Project filter"><option value="">All projects</option></select>
   <div class="stats" id="stats"></div>
   <div class="updated" id="updated">connecting…</div>
+  <button class="iconbtn" id="activity-toggle" aria-controls="activity" aria-expanded="false" aria-label="Activity log" title="Activity log"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></button>
 </header>
 <div class="layout">
   <main><div id="board"></div></main>
-  <aside class="activity"><h3>Activity</h3><div id="events"></div></aside>
+  <aside class="activity" id="activity" aria-label="Activity log"><div class="a-head"><h3>Activity</h3><button class="iconbtn" id="activity-close" aria-label="Close activity log" title="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div><div id="events"></div></aside>
 </div>
 <div class="drawer" id="drawer" aria-hidden="true">
   <header><div id="d-head" style="min-width:0"></div><button class="close" id="d-close">Close</button></header>
@@ -131,6 +142,16 @@ let selected = null;   // { project, feature }
 let selectedDoc = null;
 let lastDocKey = '';
 $('project').value = store.get('sf.project') || '';
+// The activity log is a drawer over the board, opened from the header icon. Open/closed is remembered in this browser.
+const activityOpen = () => $('activity').classList.contains('open');
+const setActivity = (open) => {
+  $('activity').classList.toggle('open', open);
+  $('activity-toggle').setAttribute('aria-expanded', String(open));
+  store.set('sf.activity', open ? 'open' : 'closed');
+};
+setActivity(store.get('sf.activity') === 'open');
+$('activity-toggle').onclick = () => setActivity(!activityOpen());
+$('activity-close').onclick = () => { setActivity(false); $('activity-toggle').focus(); };
 
 function md(src) {
   const lines = esc(src).split('\n');
@@ -358,7 +379,10 @@ document.addEventListener('input', (e) => {
   if (gate) store.set(draftKey(selected.project, selected.feature, gate), e.target.value);
 });
 $('d-close').onclick = () => { selected = null; render(); };
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && selected) { selected = null; render(); } });
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (selected) { selected = null; render(); } else if (activityOpen()) { setActivity(false); $('activity-toggle').focus(); }
+});
 $('project').onchange = () => { store.set('sf.project', $('project').value); render(); };
 poll(); setInterval(poll, 3000);
 </script>
