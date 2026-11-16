@@ -308,7 +308,7 @@ function renderDrawer() {
   const docLabel = (d) => d.replace(/^stages\/(\d+)\//, 's$1/').replace(/\.md$/, '');
   const gate = GATES[f.status];
   const human = reviewNotice ? `<div class="callout">${reviewNotice.html}</div>`
-    : gate ? `<div class="callout"><b>Your turn:</b> read the ${gate.what} below, then approve it or request changes at the bottom.</div>`
+    : gate ? `<div class="callout"><b>Your turn:</b> read the ${gate.what} in Documents below, then approve it or request changes here.</div>`
     : f.next?.kind === 'human' ? `<div class="callout"><b>Your turn:</b> ${esc(f.next.detail)}</div>` : '';
   const draft = $('r-text') ? { gate: $('r-text').closest('.review')?.dataset.gate, value: $('r-text').value } : null;
   $('d-body').innerHTML = `${human}
@@ -317,10 +317,10 @@ function renderDrawer() {
         <td><span class="dot" style="background:var(--s-${s.status})"></span>${esc(s.status)}</td>
         <td>${s.rounds}/${p.maxRounds}${s.prRounds ? ` · PR ${s.prRounds}` : ''}</td>
         <td>${s.pr ? `<a class="pr" href="${safeUrl(s.pr.url)}" target="_blank" rel="noopener">${esc(prLabel(s.pr))}</a>` : ''}</td></tr>`).join('')}</table>` : ''}
+    ${reviewPanel(p, f)}
     <div class="section">Documents</div>
     <div class="tabs">${f.docs.map((d) => `<button data-doc="${esc(d)}" class="${d === selectedDoc ? 'on' : ''}">${esc(docLabel(d))}</button>`).join('') || '<span class="next">No documents yet.</span>'}</div>
     <div class="doc" id="d-doc"></div>
-    ${reviewPanel(p, f)}
     <div class="section">History</div>
     <div class="hist">${[...f.history].reverse().map((h) => `<div><span class="id">${esc(new Date(h.at).toLocaleString())}</span> · <b>${esc(h.status)}</b>${h.note ? ` — ${esc(h.note)}` : ''}</div>`).join('')}</div>
     ${f.feedback.length ? `<div class="section">Your feedback</div><div class="hist">${f.feedback.map((x) => `<div><span class="id">${esc(x.gate)} · ${esc(ago(x.at))}</span> ${esc(x.text)}</div>`).join('')}</div>` : ''}`;
