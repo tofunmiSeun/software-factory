@@ -11,6 +11,6 @@
     "factory": "node scripts/factory.mjs",
     "status": "node scripts/factory.mjs status",
     "dashboard": "node dashboard/server.mjs",
-    "test": "node --test test/factory.test.mjs test/gitlab.test.mjs test/dashboard.test.mjs"
+    "test": "node --test test/factory.test.mjs test/gitlab.test.mjs test/dashboard.test.mjs test/stack.test.mjs"
   }
 }

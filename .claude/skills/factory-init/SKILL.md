@@ -57,7 +57,7 @@ Round 2 (only what's still open):
 - **Watch PRs for reviews**: "Every 15 minutes (Recommended)", "Every 30 minutes", "Hourly", "Don't watch; I'll run /factory-next myself". Say in the descriptions that a scheduled task checks the factory's open PRs (MRs on GitLab) with `gh` or `glab`; when there is a new review or comment (or a merge, or other agent work), it runs `/factory-next` for this project, so the builder addresses the review without you. Checks that find nothing stop right away. → `prWatch.enabled`, `prWatch.intervalMinutes`
 - **Pre-approve commands**: ask whether to add the project's install/build/test/lint/typecheck commands to `.claude/settings.local.json` `permissions.allow` (as `Bash(<command>:*)` entries) so agents can run them without prompting. Only edit that file if they say yes. Merge with what's already there.
 
-The build/review loop limit is 3 (`review.maxRounds`) and the next stage starts only after the previous PR merges (`planning.nextStageTrigger: "merge"`). Don't ask about these. Mention them in the summary.
+The build/review loop limit is 3 (`review.maxRounds`) and the next stage starts only after the previous PR merges (`planning.nextStageTrigger: "merge"`). Don't ask about these. Mention them in the summary, and that stacked PRs are available: `config:set <project> planning.nextStageTrigger stack` (with `planning.maxStackDepth`, default 2) lets stage N+1 be built and reviewed while stage N's PR is open. Only change it if the user asks.
 
 Issues are provided manually for now (`issues.source: "manual"`). Don't ask about this.
 

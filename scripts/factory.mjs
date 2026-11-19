@@ -199,6 +199,31 @@ function getStage(state, n) {
   return stage;
 }
 
+// ---------- stacked PRs ----------
+// planning.nextStageTrigger 'stack': stage N+1 branches from stage N's branch (not the base) and its PR targets that
+// branch, so building and reviewing don't wait for merges. At most planning.maxStackDepth PRs are open at once.
+// Merging or changing a parent means rebasing its children (stage:restack); factory stage branches are force-pushed
+// with --force-with-lease for that.
+const isStack = (config) => config.planning?.nextStageTrigger === 'stack';
+const stackDepth = (config) => Number(config.planning?.maxStackDepth) || 2;
+
+// The first pending stage that may start now, or null: a slot under the depth cap and every earlier stage merged/closed/PR-open.
+function stackStartable(config, state) {
+  const pending = state.stages.find((s) => s.status === 'pending');
+  if (!pending) return null;
+  if (state.stages.filter((s) => s.status === 'pr_open').length >= stackDepth(config)) return null;
+  if (state.stages.some((s) => s.n < pending.n && !['merged', 'closed', 'pr_open'].includes(s.status))) return null;
+  return pending;
+}
+
+// Feature status derived from its stages (stacked mode).
+function stackStatus(config, state) {
+  if (state.stages.length && state.stages.every((s) => s.status === 'merged')) return 'done';
+  if (state.stages.some((s) => s.restackConflict || ['needs_human', 'closed'].includes(s.status))) return 'needs_human';
+  const working = state.stages.some((s) => ['building', 'reviewing'].includes(s.status)) || stackStartable(config, state);
+  return working ? 'building' : 'awaiting_merge';
+}
+
 function logEvent(p, f, type, message, data) {
   const line = { at: now(), project: p, feature: f || null, type, message };
   if (data !== undefined) line.data = data;
@@ -230,7 +255,9 @@ function defaultConfig({ name, repoPath, remote, remoteUrl, host, slug, baseBran
       maxRounds: 3,
       passCriteria: 'No blocking findings in any lens; configured test and lint commands pass.',
     },
-    planning: { prSize: 'small: one reviewable concern per PR', nextStageTrigger: 'merge' },
+    // nextStageTrigger: 'merge' = next stage starts after the previous PR merges; 'stack' = it branches from the previous
+    // stage's branch and its PR targets that branch (at most maxStackDepth PRs open at once).
+    planning: { prSize: 'small: one reviewable concern per PR', nextStageTrigger: 'merge', maxStackDepth: 2 },
     gates: { spec: true, plan: true },
     prFeedback: { mode: 'builder-reads-pr' },
     prWatch: { enabled: false, intervalMinutes: 15, taskId: null },
@@ -405,6 +432,8 @@ commands['stages:load'] = ({ positional: [p, f] }) => {
       branch: null,
       worktree: null,
       pr: null,
+      parent: null,
+      parentSha: null,
       lastFeedbackAt: null,
     };
   });
@@ -435,6 +464,7 @@ commands['stage:start'] = ({ positional: [p, f, nArg] }) => {
     ? getStage(state, nArg)
     : state.stages.find((s) => ['building', 'reviewing'].includes(s.status)) || state.stages.find((s) => s.status === 'pending');
   if (!stage) die('no pending stage left');
+  const stack = isStack(config);
   const earlierOpen = state.stages.find((s) => s.n < stage.n && !['merged', 'closed'].includes(s.status));
   if (earlierOpen && config.planning.nextStageTrigger === 'merge')
     die(`stage ${earlierOpen.n} is not merged yet (status ${earlierOpen.status}); next stage starts after merge`);
@@ -446,14 +476,31 @@ commands['stage:start'] = ({ positional: [p, f, nArg] }) => {
   if (fs.existsSync(path.join(wt, '.git'))) {
     resumed = true;
   } else {
+    // Stacked: branch from the nearest unmerged earlier stage (its PR must be open), not from the base.
+    let parent = null;
+    if (stack) {
+      const unmerged = state.stages.filter((s) => s.n < stage.n && !['merged', 'closed'].includes(s.status));
+      const notReady = unmerged.find((s) => s.status !== 'pr_open');
+      if (notReady) die(`stage ${notReady.n} is ${notReady.status}; open its PR before starting stage ${stage.n} (stacked mode)`);
+      const max = stackDepth(config);
+      if (state.stages.filter((s) => s.status === 'pr_open').length >= max)
+        die(`${max} PR(s) are already open (planning.maxStackDepth); wait for one to merge before starting stage ${stage.n}`);
+      parent = unmerged.at(-1) || null;
+    }
     tryGit(repo, 'fetch', '--quiet', remote, baseBranch);
     tryGit(repo, 'worktree', 'prune');
-    const base = tryGit(repo, 'rev-parse', '--verify', '--quiet', `refs/remotes/${remote}/${baseBranch}`)
+    let base = tryGit(repo, 'rev-parse', '--verify', '--quiet', `refs/remotes/${remote}/${baseBranch}`)
       ? `${remote}/${baseBranch}`
       : baseBranch;
+    if (parent) {
+      base = tryGit(repo, 'rev-parse', '--verify', '--quiet', `refs/heads/${parent.branch}`);
+      if (!base) die(`stage ${parent.n}'s branch ${parent.branch} not found locally`);
+    }
     if (tryGit(repo, 'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`)) git(repo, 'worktree', 'add', wt, branch);
     else git(repo, 'worktree', 'add', '--no-track', '-b', branch, wt, base);
     stage.baseSha = git(wt, 'rev-parse', 'HEAD');
+    stage.parent = parent ? parent.n : null;
+    stage.parentSha = parent ? stage.baseSha : null;
   }
   Object.assign(stage, { branch, worktree: wt, status: stage.status === 'pending' ? 'building' : stage.status });
   stage.startedAt ||= now();
@@ -538,19 +585,28 @@ function findOpenPr(config, branch) {
   return pr && pr.state === 'OPEN' ? pr : null;
 }
 
-function createPr(config, { branch, title, bodyFile, cwd }) {
+function createPr(config, { branch, base = config.repo.baseBranch, title, bodyFile, cwd }) {
   if (requireForge(config) === 'gitlab') {
     const mr = glabWrite(config, 'POST', `${glabProject(config)}/merge_requests`, {
       source_branch: branch,
-      target_branch: config.repo.baseBranch,
+      target_branch: base,
       title,
       description: fs.readFileSync(bodyFile, 'utf8'),
     });
     return fromGitlabMr(mr);
   }
   const repoArgs = ['--repo', config.repo.slug];
-  run('gh', ['pr', 'create', ...repoArgs, '--base', config.repo.baseBranch, '--head', branch, '--title', title, '--body-file', bodyFile], { cwd });
+  run('gh', ['pr', 'create', ...repoArgs, '--base', base, '--head', branch, '--title', title, '--body-file', bodyFile], { cwd });
   return JSON.parse(run('gh', ['pr', 'view', branch, ...repoArgs, '--json', 'number,url,state']));
+}
+
+// Point an open PR/MR at a different target branch (a stacked stage whose parent merged moves to the base).
+function retargetPr(config, number, base) {
+  if (requireForge(config) === 'gitlab') {
+    glabWrite(config, 'PUT', `${glabProject(config)}/merge_requests/${number}`, { target_branch: base });
+    return;
+  }
+  run('gh', ['pr', 'edit', String(number), '--repo', config.repo.slug, '--base', base]);
 }
 
 function commentOnPr(config, number, bodyFile) {
@@ -631,22 +687,26 @@ commands['stage:pr'] = ({ positional: [p, f, n], flags }) => {
   if (Number(ahead) === 0) die('branch has no commits to open a PR with');
 
   const reauthored = applyIdentity(config, stage);
-  git(stage.worktree, 'push', '--quiet', '-u', config.repo.remote, `HEAD:refs/heads/${stage.branch}`);
+  // Stacked branches get rebased by stage:restack, so their pushes may rewrite history (lease-protected).
+  git(stage.worktree, 'push', '--quiet', '-u', ...(isStack(config) ? [`--force-with-lease=${stage.branch}`] : []), config.repo.remote, `HEAD:refs/heads/${stage.branch}`);
+  stage.pushedSha = git(stage.worktree, 'rev-parse', 'HEAD');
   let pr = findOpenPr(config, stage.branch);
   if (!pr) {
-    const body = fs.readFileSync(path.resolve(flags['body-file']), 'utf8');
+    const parent = stage.parent != null ? getStage(state, stage.parent) : null;
+    const stackNote = parent?.pr ? `> **Stacked** on ${prRef(config, parent.pr.number)} (stage ${parent.n}). This targets that branch; merge it first.\n\n` : '';
+    const body = stackNote + fs.readFileSync(path.resolve(flags['body-file']), 'utf8');
     const bodyFile = path.join(featureDir(p, f), 'stages', String(n), 'pr-body.md');
     fs.mkdirSync(path.dirname(bodyFile), { recursive: true });
     const sig = config.identity?.signature ? `\n\n---\n_${config.identity.signature}_` : '';
     fs.writeFileSync(bodyFile, `${body.trim()}${sig}\n\n${PR_MARKER}\n`);
-    pr = createPr(config, { branch: stage.branch, title: flags.title, bodyFile, cwd: stage.worktree });
+    pr = createPr(config, { branch: stage.branch, base: parent ? parent.branch : config.repo.baseBranch, title: flags.title, bodyFile, cwd: stage.worktree });
   }
   const ref = prRef(config, pr.number);
   stage.pr = { number: pr.number, url: pr.url, ref, openedAt: stage.pr?.openedAt || now() };
   stage.status = 'pr_open';
   stage.lastFeedbackAt ||= now();
-  state.status = 'awaiting_merge';
-  state.history.push({ at: now(), status: 'awaiting_merge', note: `stage ${n} ${ref}` });
+  state.status = isStack(config) ? stackStatus(config, state) : 'awaiting_merge';
+  state.history.push({ at: now(), status: state.status, note: `stage ${n} ${ref}` });
   saveState(p, f, state);
   logEvent(p, f, 'stage.pr', `stage ${n} ${ref} ${pr.url}`);
   out({ ...stage, reauthored });
@@ -764,6 +824,91 @@ function uploadToGitlab(config, tmp, files) {
   return urls;
 }
 
+// Rebase stacked stages onto their parent's current tip (or onto the base once the parent merged), force-push them
+// (lease-protected) and retarget a child's PR to the base after its parent merged. Stages go in order, so a change
+// cascades down the stack. A conflict aborts the rebase, flags the stage (restackConflict) and stops: the rest of the
+// stack depends on it. State is saved after every stage so a failure never leaves parentSha out of step with the branch.
+function restackStages(config, p, f, state, only) {
+  const { path: repo, remote, baseBranch } = config.repo;
+  tryGit(repo, 'fetch', '--quiet', remote);
+  const results = [];
+  for (const stage of state.stages) {
+    if (only != null && stage.n !== Number(only)) continue;
+    if (stage.parent == null || ['pending', 'merged', 'closed'].includes(stage.status)) continue;
+    const wt = stage.worktree;
+    if (!wt || !fs.existsSync(wt)) continue;
+    if (!stage.parentSha) die(`stage ${stage.n} has a parent but no recorded parent commit; cannot restack`);
+    const parent = getStage(state, stage.parent);
+    const merged = parent.status === 'merged';
+    const rev = (ref) => tryGit(repo, 'rev-parse', '--verify', '--quiet', ref);
+    const newBase = merged ? rev(`refs/remotes/${remote}/${baseBranch}`) || rev(baseBranch) : rev(`refs/heads/${parent.branch}`);
+    if (!newBase) die(`cannot resolve the new base for stage ${stage.n}`);
+    if (!merged && newBase === stage.parentSha && !stage.restackConflict) {
+      results.push({ stage: stage.n, result: 'up-to-date' });
+      continue;
+    }
+    const conflict = (detail) => {
+      stage.restackConflict = true;
+      stage.restackNote = detail;
+      state.history.push({ at: now(), status: 'needs_human', note: `stage ${stage.n} restack: ${detail}` });
+      saveState(p, f, state);
+      logEvent(p, f, 'stage.restack_conflict', `stage ${stage.n}: ${detail}`);
+      results.push({ stage: stage.n, result: 'conflict', worktree: wt, detail });
+    };
+    if (tryGit(wt, 'status', '--porcelain')) {
+      conflict('worktree has uncommitted changes');
+      break;
+    }
+    const tracking = stage.pr ? rev(`refs/remotes/${remote}/${stage.branch}`) : null;
+    // The remote branch must still be what the factory last pushed; otherwise someone else pushed to it and a force-push would drop their commits.
+    const foreign = tracking && (stage.pushedSha ? tracking !== stage.pushedSha : tryGit(wt, 'merge-base', '--is-ancestor', tracking, 'HEAD') === null);
+    if (foreign) {
+      conflict(`${remote}/${stage.branch} has commits that are not in the worktree; not overwriting them`);
+      break;
+    }
+    try {
+      // Already on top of the new base (a conflict resolved by hand): nothing to replay, just record it and push.
+      if (tryGit(wt, 'merge-base', '--is-ancestor', newBase, 'HEAD') === null)
+        run('git', ['-C', wt, 'rebase', '--quiet', '--onto', newBase, stage.parentSha], { env: identityEnv(config) ?? process.env });
+    } catch (err) {
+      tryGit(wt, 'rebase', '--abort');
+      conflict(`rebase onto ${merged ? `${remote}/${baseBranch}` : parent.branch} hit conflicts; resolve it in ${wt}, then run stage:restack again`);
+      break;
+    }
+    stage.parent = merged ? null : parent.n;
+    stage.parentSha = merged ? null : newBase;
+    stage.baseSha = newBase;
+    delete stage.restackConflict;
+    delete stage.restackNote;
+    if (stage.pr) {
+      if (merged) retargetPr(config, stage.pr.number, baseBranch);
+      git(wt, 'push', '--quiet', `--force-with-lease=${stage.branch}`, remote, `HEAD:refs/heads/${stage.branch}`);
+      stage.pushedSha = git(wt, 'rev-parse', 'HEAD');
+    }
+    saveState(p, f, state);
+    logEvent(p, f, 'stage.restacked', `stage ${stage.n} rebased onto ${merged ? `${remote}/${baseBranch}` : parent.branch}`);
+    results.push({ stage: stage.n, result: 'restacked', onto: merged ? baseBranch : parent.branch, retargeted: !!(merged && stage.pr) });
+  }
+  return results;
+}
+
+// Stacked mode: bring descendants of a changed (or merged) stage up to date. Run after the builder pushes fixes to a stage that has children.
+commands['stage:restack'] = ({ positional: [p, f, nArg] }) => {
+  const config = loadConfig(p);
+  if (!isStack(config)) die('stage:restack only applies when planning.nextStageTrigger is "stack"');
+  const state = loadState(p, f);
+  const hadConflict = state.stages.some((s) => s.restackConflict);
+  const results = restackStages(config, p, f, state, nArg);
+  const status = stackStatus(config, state);
+  const resolved = hadConflict && !state.stages.some((s) => s.restackConflict);
+  if (state.status !== status && (['building', 'awaiting_merge'].includes(state.status) || resolved || status === 'needs_human')) {
+    state.status = status;
+    state.history.push({ at: now(), status, note: 'restack' });
+  }
+  saveState(p, f, state);
+  out({ results, featureStatus: state.status });
+};
+
 // Read a stage's PR and the human feedback on it newer than lastFeedbackAt (the factory's own comments excluded).
 // Read-only: shared by stage:sync (which acts on it) and watch:check (which only reports it).
 function prActivity(config, stage) {
@@ -781,7 +926,7 @@ commands['stage:sync'] = ({ positional: [p, f, nArg] }) => {
   const config = loadConfig(p);
   requireForge(config);
   const state = loadState(p, f);
-  const stage = getStage(state, nArg ?? state.currentStage);
+  const stage = getStage(state, nArg ?? (isStack(config) ? state.stages.find((s) => s.status === 'pr_open')?.n : state.currentStage));
   if (!stage.pr) die(`stage ${stage.n} has no PR`);
   const { pr, feedback } = prActivity(config, stage);
 
@@ -792,14 +937,25 @@ commands['stage:sync'] = ({ positional: [p, f, nArg] }) => {
     if (stage.worktree && fs.existsSync(stage.worktree)) {
       if (tryGit(config.repo.path, 'worktree', 'remove', stage.worktree) === null) cleanup = `left in place (uncommitted changes?) at ${stage.worktree}`;
     }
-    const next = state.stages.find((s) => s.status === 'pending');
-    if (next) {
-      state.status = 'building';
-      state.currentStage = next.n;
-      state.history.push({ at: now(), status: 'building', note: `stage ${stage.n} merged; next stage ${next.n}` });
+    let next;
+    let restacked = [];
+    if (isStack(config)) {
+      // Children of the merged stage now rebase onto the updated base and their PRs retarget to it.
+      restacked = restackStages(config, p, f, state);
+      next = stackStartable(config, state);
+      state.status = stackStatus(config, state);
+      state.currentStage = next?.n ?? state.stages.find((s) => s.status === 'pr_open')?.n ?? state.currentStage;
+      state.history.push({ at: now(), status: state.status, note: `stage ${stage.n} merged${next ? `; next stage ${next.n}` : ''}` });
     } else {
-      state.status = 'done';
-      state.history.push({ at: now(), status: 'done', note: 'all stages merged' });
+      next = state.stages.find((s) => s.status === 'pending');
+      if (next) {
+        state.status = 'building';
+        state.currentStage = next.n;
+        state.history.push({ at: now(), status: 'building', note: `stage ${stage.n} merged; next stage ${next.n}` });
+      } else {
+        state.status = 'done';
+        state.history.push({ at: now(), status: 'done', note: 'all stages merged' });
+      }
     }
     saveState(p, f, state);
     tryGit(config.repo.path, 'fetch', '--quiet', config.repo.remote);
@@ -809,7 +965,7 @@ commands['stage:sync'] = ({ positional: [p, f, nArg] }) => {
       /* non-fatal */
     }
     logEvent(p, f, 'stage.merged', `stage ${stage.n} merged${next ? `; next: stage ${next.n}` : '; feature done'}`);
-    out({ result: 'merged', stage: stage.n, worktree: cleanup, nextStage: next ? next.n : null, featureStatus: state.status });
+    out({ result: 'merged', stage: stage.n, worktree: cleanup, nextStage: next ? next.n : null, restacked, featureStatus: state.status });
     return;
   }
 
@@ -842,25 +998,26 @@ commands['watch:check'] = ({ positional: [only] }) => {
     const config = loadConfig(p);
     for (const f of listFeatures(p)) {
       const state = loadState(p, f);
-      const next = nextAction(config, state);
-      if (next.kind === 'agent') items.push({ project: p, feature: f, reason: next.action, detail: next.detail });
-      if (next.kind !== 'host') continue;
-      const stage = state.stages.find((s) => s.n === state.currentStage);
-      if (!stage?.pr) continue;
-      const ref = prRef(config, stage.pr.number);
-      let activity;
-      try {
-        requireForge(config);
-        activity = prActivity(config, stage);
-      } catch (err) {
-        items.push({ project: p, feature: f, reason: 'error', detail: `${ref}: ${err.message}` });
-        continue;
+      for (const next of nextActions(config, state)) {
+        if (next.kind === 'agent') items.push({ project: p, feature: f, reason: next.action, detail: next.detail });
+        if (next.kind !== 'host') continue;
+        const stage = state.stages.find((s) => s.n === (next.stage ?? state.currentStage));
+        if (!stage?.pr) continue;
+        const ref = prRef(config, stage.pr.number);
+        let activity;
+        try {
+          requireForge(config);
+          activity = prActivity(config, stage);
+        } catch (err) {
+          items.push({ project: p, feature: f, reason: 'error', detail: `${ref}: ${err.message}` });
+          continue;
+        }
+        const { pr, feedback } = activity;
+        if (pr.state === 'MERGED') items.push({ project: p, feature: f, reason: 'merged', detail: `${ref} merged` });
+        else if (pr.state === 'CLOSED') items.push({ project: p, feature: f, reason: 'closed', detail: `${ref} closed without merge` });
+        else if (feedback.length)
+          items.push({ project: p, feature: f, reason: 'review', detail: `${ref}: ${feedback.length} new review item(s) from ${[...new Set(feedback.map((x) => x.author).filter(Boolean))].join(', ') || 'someone'}` });
       }
-      const { pr, feedback } = activity;
-      if (pr.state === 'MERGED') items.push({ project: p, feature: f, reason: 'merged', detail: `${ref} merged` });
-      else if (pr.state === 'CLOSED') items.push({ project: p, feature: f, reason: 'closed', detail: `${ref} closed without merge` });
-      else if (feedback.length)
-        items.push({ project: p, feature: f, reason: 'review', detail: `${ref}: ${feedback.length} new review item(s) from ${[...new Set(feedback.map((x) => x.author).filter(Boolean))].join(', ') || 'someone'}` });
     }
   }
   const lock = only ? readLock(only) : null;
@@ -903,7 +1060,23 @@ commands['event'] = ({ positional: [p, f, type, ...msg] }) => {
 };
 
 // What should happen next for every active feature. kind: agent (factory acts), human (waiting on you), host (waiting on the PR/MR on GitHub or GitLab).
+// Stacked mode can have several things to do for one feature at once: sync every open PR, and build the next stage.
+// sync-pr items come first, so a merge frees a slot before the build is decided (re-run `next` after syncing).
+export function nextActions(config, state) {
+  if (!isStack(config) || !['building', 'awaiting_merge'].includes(state.status)) return [nextAction(config, state)];
+  const acts = state.stages
+    .filter((s) => s.status === 'pr_open')
+    .map((s) => ({ kind: 'host', action: 'sync-pr', stage: s.n, detail: `Waiting for review and merge of ${s.pr ? prRef(config, s.pr.number) : 'the PR'} (stage ${s.n})` }));
+  const target = state.stages.find((s) => ['building', 'reviewing'].includes(s.status)) || stackStartable(config, state);
+  if (target) acts.push({ kind: 'agent', action: 'build-stage', stage: target.n, detail: `Building and reviewing stage ${target.n}: ${target.title}` });
+  return acts.length ? acts : [{ kind: 'agent', action: 'plan', detail: 'No buildable stage; check plan' }];
+}
+
 export function nextAction(config, state) {
+  if (isStack(config) && ['building', 'awaiting_merge'].includes(state.status)) {
+    const acts = nextActions(config, state);
+    return acts.find((a) => a.kind === 'agent') ?? acts[0];
+  }
   const stage = state.currentStage ? state.stages.find((s) => s.n === state.currentStage) : null;
   switch (state.status) {
     case 'spec_drafting':
@@ -937,7 +1110,7 @@ commands['next'] = ({ positional: [only] }) => {
     for (const f of listFeatures(p)) {
       const state = loadState(p, f);
       if (['done', 'cancelled'].includes(state.status)) continue;
-      result.push({ project: p, feature: f, title: state.title, status: state.status, ...nextAction(config, state) });
+      for (const next of nextActions(config, state)) result.push({ project: p, feature: f, title: state.title, status: state.status, ...next });
     }
   }
   out(result);
@@ -996,6 +1169,7 @@ function usage() {
   stage:screenshots <project> <feature> <n>   capture + publish UI screenshots, writes stages/<n>/screenshots.md
   stage:pr <project> <feature> <n> --title "<title>" --body-file <path>   push and open the PR (GitHub) or MR (GitLab)
   stage:sync <project> <feature> [n]     check the PR/MR: merged / closed / new feedback
+  stage:restack <project> <feature> [n]  stacked mode: rebase child stages onto their parent / the base, force-push (lease), retarget PRs
   stage:comment <project> <feature> <n> --body-file <path>   reply on the PR/MR (adds signature + marker)
 
   event <project> <feature|-> <type> <message>

@@ -77,8 +77,8 @@ Your own clone of the target repo is never modified. The factory adds git worktr
 
 ### Rules the factory enforces
 - Build ⇄ review is capped at **3 rounds** per stage (`review.maxRounds`). After that, the stage is marked **needs you**. Unblock it with `/factory-review <project> <feature> <guidance>`.
-- **The next stage starts only after the previous PR is merged.** It branches from the updated base.
-- The factory never merges, force-pushes or rebases shared branches. Its own PR comments carry a hidden marker so they're never mistaken for your feedback.
+- **The next stage starts only after the previous PR is merged.** It branches from the updated base. (Opt in to stacked PRs instead, below.)
+- The factory never merges, force-pushes or rebases shared branches. In stacked mode it rebases and force-pushes (with lease) only its own stage branches. Its own PR comments carry a hidden marker so they're never mistaken for your feedback.
 
 ### PR review comments
 Set during `/factory-init` (`prFeedback.mode`):
@@ -98,3 +98,14 @@ Headless runs can't answer permission prompts. During `/factory-init`, say yes t
 npm test                 # CLI end-to-end (local bare remote + fake gh / glab) and dashboard API tests
 npm run status
 ```
+
+### Stacked PRs (optional)
+By default stages are strictly sequential. To build and review stage N+1 while stage N's PR is still open, set (per project):
+```
+node scripts/factory.mjs config:set <project> planning.nextStageTrigger stack
+node scripts/factory.mjs config:set <project> planning.maxStackDepth 2
+```
+- Stage N+1 branches from stage N's branch and its PR targets that branch ("Stacked on PR #N").
+- At most `maxStackDepth` PRs are open at once; the next stage waits for a merge.
+- When stage N changes (review fixes) the factory rebases the later stages onto it. When stage N merges, later stages are rebased onto the updated base and their PRs retarget it. Review and merge in order, bottom of the stack first.
+- A rebase conflict stops the stack: the stage is flagged and the feature is **needs you**. Resolve it in the stage's worktree, then run `node scripts/factory.mjs stage:restack <project> <feature>`.

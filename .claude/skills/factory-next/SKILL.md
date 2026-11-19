@@ -33,7 +33,7 @@ Handle items one feature at a time, in order. For each item, act on `action`:
 Paths below: `P` = `projects/<project>`, `F` = `P/features/<feature>`. Always pass absolute paths to subagents.
 
 ## Build loop
-1. `node scripts/factory.mjs stage:start <project> <feature> <n>`. This gives you `worktree`, `branch` and `stage.baseSha`. If it refuses because an earlier stage isn't merged, skip this feature.
+1. `node scripts/factory.mjs stage:start <project> <feature> <n>`. This gives you `worktree`, `branch` and `stage.baseSha`. If it refuses (an earlier stage isn't merged, or in stacked mode the previous stage has no open PR yet or the stack is full), skip this feature.
 2. Repeat:
    a. `node scripts/factory.mjs stage:round <project> <feature> <n>`. If `allowed` is false, go to **Round limit**.
    b. Launch the **builder** subagent:
@@ -76,7 +76,7 @@ Stop working on this feature.
 
 ## Sync the PR
 `node scripts/factory.mjs stage:sync <project> <feature> <n>`
-- `merged`: if `nextStage` is set, run the **Build loop** for it now (it branches from the updated base), then **Open the PR**. If `featureStatus` is `done`, report that the feature is complete.
+- `merged`: if `nextStage` is set, run the **Build loop** for it now (it branches from the updated base), then **Open the PR**. If `featureStatus` is `done`, report that the feature is complete. In stacked mode `restacked` lists the child stages the CLI already rebased onto the base and retargeted; if one has `result: "conflict"`, list it under "Waiting on you" (the feature is `needs_human`) and don't build further stages.
 - `closed`: the CLI has already set needs_human. List it under "Waiting on you".
 - `open` with no `newFeedback`: still waiting on the human. Mention the PR.
 - `open` with `newFeedback`: act on `prFeedback.mode` from the config:
@@ -90,6 +90,13 @@ Stop working on this feature.
     5. `stage:pr` again, with the same title and body file. This pushes the new commits to the open PR.
     6. Reply on the PR: write a file listing each feedback item and what changed, then `node scripts/factory.mjs stage:comment <project> <feature> <n> --body-file <file>`. It adds the factory's signature and the `<!-- software-factory -->` marker. Don't post with `gh pr comment` or `glab mr note` directly.
     7. `stage:update ... --json '{"status":"pr_open","lastFeedbackAt":"<latestFeedbackAt from the sync>"}'` and `feature:status ... awaiting_merge`.
+
+## Stacked PRs (`planning.nextStageTrigger: "stack"`)
+`next` can return several items for one feature: a `sync-pr` for every open PR, then a `build-stage`. So:
+1. Do all the feature's `sync-pr` items first (oldest stage first). A merge frees a slot and restacks the children.
+2. Re-run `node scripts/factory.mjs next <project>` and handle the feature's `build-stage` item, if any. Stage N+1 builds while stage N's PR is open, branching from stage N's branch; its reviewer diff base is `baseSha`, the parent's tip, so the review covers only that stage.
+3. Whenever a stage's branch changed after its PR was opened (PR-feedback fixes), run `node scripts/factory.mjs stage:restack <project> <feature>` right after the `stage:pr` that pushes them. Children are rebased onto it and force-pushed (with lease). On `result: "conflict"` the feature becomes `needs_human`: list it under "Waiting on you" with the stage's worktree path, and stop building on that stack. After the human (or the builder, on their instruction) resolves it in the worktree, run `stage:restack` again.
+4. Never post-process these branches with your own git commands; only `stage:restack`, `stage:pr` and `stage:sync` rebase or force-push, and only factory stage branches.
 
 ## Finish
 Reply with a short report:

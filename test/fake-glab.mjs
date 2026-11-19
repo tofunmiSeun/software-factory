@@ -60,6 +60,9 @@ if (kind === 'uploads' && opts.method === 'POST') {
   reply(note);
 } else if (sub === 'notes') {
   reply(mr.notes);
+} else if (opts.method === 'PUT') {
+  Object.assign(mr, opts.input);
+  reply({ iid: mr.iid, target_branch: mr.target_branch });
 } else {
   const { notes, ...rest } = mr;
   reply(rest);

@@ -334,7 +334,7 @@ function renderDrawer() {
   const draft = $('r-text') ? { gate: $('r-text').closest('.review')?.dataset.gate, value: $('r-text').value } : null;
   $('d-body').innerHTML = `${human}
     ${f.stages.length ? `<div class="section">Stages</div><table class="stages"><tr><th>#</th><th>Stage</th><th>Status</th><th>Rounds</th><th>PR / MR</th></tr>
-      ${f.stages.map((s) => `<tr><td>${s.n}</td><td>${esc(s.title)}<div class="id">${esc(s.branch || '')}</div></td>
+      ${f.stages.map((s) => `<tr><td>${s.n}</td><td>${esc(s.title)}<div class="id">${esc(s.branch || '')}</div>${s.parent ? `<div class="id">stacked on stage ${s.parent}</div>` : ''}${s.restackConflict ? `<div class="id" style="color:var(--s-needs_human, #c0392b)">restack conflict: ${esc(s.restackNote || 'resolve in the worktree')}</div>` : ''}</td>
         <td><span class="dot" style="background:var(--s-${s.status})"></span>${esc(s.status)}</td>
         <td>${s.rounds}/${p.maxRounds}${s.prRounds ? ` · PR ${s.prRounds}` : ''}</td>
         <td>${s.pr ? `<a class="pr" href="${safeUrl(s.pr.url)}" target="_blank" rel="noopener">${esc(prLabel(s.pr))}</a>` : ''}</td></tr>`).join('')}</table>` : ''}

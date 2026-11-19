@@ -37,9 +37,10 @@ projects/<project>/
 - Never edit the user's own clone (`config.repo.path`). Code changes happen only in `projects/<p>/worktrees/*`, and only by the builder.
 - `projects/<p>/checkout` is read-only context. Refresh it with `project:refresh`. Never edit it.
 - Stop at human gates (`awaiting_spec_approval`, `awaiting_plan_approval`, `needs_human`). Never approve on the human's behalf.
-- Never merge PRs or MRs, force-push, rebase shared branches, or delete remote branches.
+- Never merge PRs or MRs, force-push, rebase shared branches, or delete remote branches. The one exception is stacked mode: `stage:restack` and `stage:pr` rebase and `--force-with-lease` push the factory's own stage branches (`factory/<feature>/s<n>-...`), and only those.
 - A stage's build/review loop is capped at `review.maxRounds` (3). `stage:round` enforces it. When it says no, mark the stage needs_human.
-- The next stage starts only after the previous stage's PR is merged (`stage:start` enforces it).
+- By default (`planning.nextStageTrigger: "merge"`) the next stage starts only after the previous stage's PR is merged (`stage:start` enforces it).
+- In stacked mode (`"stack"`) the next stage starts once the previous stage's PR is open: it branches from that stage's branch and its PR targets it. `planning.maxStackDepth` (default 2) caps how many PRs may be open at once. After a stage's branch changes (PR feedback fixes) run `stage:restack`; `stage:sync` restacks children when a parent merges. A rebase conflict flags the stage and the feature goes `needs_human`.
 - `/factory-next` holds a per-project run lock (`run:lock` / `run:unlock`) so a scheduled PR-watch run never overlaps another run. Always release it.
 - Post PR comments only with `stage:comment`. It adds the factory's signature and the `<!-- software-factory -->` marker, so the factory doesn't treat its own comments as feedback.
 - Commits get the factory identity (`identity.name`/`email`) when `stage:pr` pushes; it re-authors only commits not yet on the remote.

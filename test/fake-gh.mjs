@@ -41,6 +41,9 @@ if (args[0] === 'pr' && args[1] === 'view') {
   });
   save();
   process.stdout.write(`https://github.com/${flag('repo')}/pull/${number}\n`);
+} else if (args[0] === 'pr' && args[1] === 'edit') {
+  find(args[2]).base = flag('base');
+  save();
 } else if (args[0] === 'pr' && args[1] === 'comment') {
   find(args[2]).comments.push({ author: { login: 'me' }, createdAt: new Date().toISOString(), body: fs.readFileSync(flag('body-file'), 'utf8') });
   save();
