@@ -16,7 +16,7 @@ human issue → spec-builder → [human approves spec | feedback → spec-builde
 ## Commands
 - `/factory-init <repo-path>`: register a codebase and run the setup interview
 - `/factory-issue [project] <text>`: new work → draft spec
-- `/factory-review [project] [feature] [approve | feedback]`: no verdict presents the spec/plan/blocked stage for review; `approve` approves; other text is feedback or unblock guidance
+- `/factory-review [project] [feature] [approve | feedback]`: no verdict opens the spec/plan in Claude's plan-review card (Approve there = approve; Request changes = feedback, after a confirm card) or presents a blocked stage; `approve` approves; other text is feedback or unblock guidance
 - `/factory-next [project]`: advance everything that doesn't need a human
 - `/factory-status`: overview
 

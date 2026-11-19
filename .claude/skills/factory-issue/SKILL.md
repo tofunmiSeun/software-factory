@@ -37,8 +37,5 @@ Check that `spec.md` exists and is non-empty. If it doesn't, retry the subagent 
 ## 4. Gate
 - If `gates.spec` is true (default):
   `node scripts/factory.mjs feature:status <project> <feature> awaiting_spec_approval`
-  Reply with the spec path, the spec-builder's summary and its open questions. Then tell the user:
-  - review it here: `/factory-review <project> <feature>`
-  - approve: `/factory-review <project> <feature> approve`
-  - request changes: `/factory-review <project> <feature> <your feedback>`
+  Give the spec-builder's summary in one short paragraph. Then open the review card: read `.claude/skills/factory-review/SKILL.md` and follow section 2a ("Spec or plan: review in the plan card") for this feature, acting on the answer as it says. If plan mode isn't available, use its text fallback (2c).
 - If `gates.spec` is false: set the status to `planning` and continue with the planning steps in `.claude/skills/factory-review/SKILL.md` ("Approve spec").

@@ -97,4 +97,6 @@ Reply with a short report:
 - **Waiting on you**: each item with the exact command (`/factory-review ...`) or the PR link to review and merge
 - **Waiting on GitHub / GitLab**: open PRs and MRs with no new feedback
 
+Then, once every run lock is released (`run:unlock`), check what is waiting on the human. If exactly one spec or plan is waiting, open the review card for it: read `.claude/skills/factory-review/SKILL.md` and follow section 2a. Skip this in a non-interactive run (`claude -p`), and also when more than one item is waiting; in those cases the report's `/factory-review` commands are enough.
+
 To run this unattended, it can be called on a schedule, e.g. `claude -p "/factory-next"` (see README).

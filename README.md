@@ -32,10 +32,12 @@ Then in Claude Code:
 /factory-init ~/code/my-app          # register a repo; answer a few setup questions
 /factory-issue my-app Let signed-in users save their cart and come back to it later
                                       # → drafts projects/my-app/features/001-.../spec.md
-/factory-review my-app 001           # walks you through the spec and its open questions
-/factory-review my-app 001 approve   # approve the spec   (or: /factory-review my-app 001 <feedback>)
-/factory-review my-app 001           # walks you through the stage plan
-/factory-review my-app 001 approve   # approve the plan → builds stage 1 and opens its PR
+                                      # → opens the spec in Claude's plan-review card:
+                                      #   Approve → work-planner drafts the plan → the plan card opens
+                                      #   Request changes (inline comments OK) → confirm → spec-builder revises → card reopens
+                                      # Approving the plan builds stage 1 and opens its PR
+/factory-review my-app 001           # reopen the review card for whatever is waiting
+/factory-review my-app 001 approve   # or answer by typing:  ... approve | ... <feedback>
 # …review & merge the PR on GitHub (or the MR on GitLab)…
 /factory-next                        # sees the merge, builds the next stage, handles PR comments
 /factory-status                      # what's going on, what's waiting on you
