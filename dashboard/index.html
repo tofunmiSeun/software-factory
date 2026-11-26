@@ -25,12 +25,15 @@
   .stats { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
   .stat { padding: 4px 10px; border-radius: 999px; background: var(--chip); font-size: 12px; color: var(--muted); }
   .stat b { color: var(--ink); }
+  button.stat { border: 0; font: inherit; font-size: 12px; cursor: pointer; }
+  button.stat:hover { background: var(--line); }
+  button.stat i { font-style: normal; opacity: .7; }
   .stat.hot { background: var(--accent-soft); color: var(--accent); }
   .stat.hot b { color: var(--accent); }
   .updated { font-size: 12px; color: var(--muted); font-family: var(--mono); }
   .layout { min-height: calc(100vh - 58px); }
   main { overflow-x: auto; padding: 18px 22px; }
-  .board { display: grid; grid-template-columns: repeat(6, minmax(190px, 1fr)); gap: 12px; min-width: 1200px; }
+  .board { display: grid; grid-template-columns: repeat(var(--cols, 6), minmax(190px, 1fr)); gap: 12px; min-width: calc(var(--cols, 6) * 200px); }
   .col h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; display: flex; justify-content: space-between; }
   .col .list { display: flex; flex-direction: column; gap: 10px; min-height: 60px; padding: 6px; border-radius: 10px; background: color-mix(in srgb, var(--chip) 55%, transparent); }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 11px 12px; cursor: pointer; transition: transform .08s, box-shadow .08s; }
@@ -141,6 +144,8 @@ let data = null;
 let selected = null;   // { project, feature }
 let selectedDoc = null;
 let lastDocKey = '';
+// The Done column can be hidden from the "done" count in the header. The choice is remembered in this browser.
+let doneHidden = store.get('sf.hideDone') === '1';
 $('project').value = store.get('sf.project') || '';
 // The activity log is a drawer over the board, opened from the header icon. Open/closed is remembered in this browser.
 const activityOpen = () => $('activity').classList.contains('open');
@@ -198,7 +203,7 @@ function renderHeader() {
     <span class="stat ${turn ? 'hot' : ''}"><b>${turn}</b> waiting on you</span>
     <span class="stat"><b>${building}</b> in progress</span>
     <span class="stat"><b>${prs}</b> open PRs</span>
-    <span class="stat"><b>${done}</b> done</span>`;
+    <button class="stat" id="done-toggle" aria-pressed="${!doneHidden}" title="${doneHidden ? 'Show' : 'Hide'} the Done column"><b>${done}</b> done <i>· ${doneHidden ? 'show' : 'hide'}</i></button>`;
   $('updated').textContent = 'updated ' + new Date(data.generatedAt).toLocaleTimeString();
 }
 
@@ -228,7 +233,8 @@ function renderBoard() {
     $('board').innerHTML = `<div class="empty">No features yet.<br><br>Run <code>/factory-issue ${esc($('project').value || data.projects[0].name)} describe what to build</code></div>`;
     return;
   }
-  $('board').innerHTML = `<div class="board">${COLUMNS.map((c) => {
+  const shown = COLUMNS.filter((c) => !(doneHidden && c.title === 'Done'));
+  $('board').innerHTML = `<div class="board" style="--cols:${shown.length}">${shown.map((c) => {
     const items = fs.filter((f) => c.statuses.includes(f.status)).sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
     return `<section class="col"><h2><span>${c.title}</span><span>${items.length}</span></h2><div class="list">${items.map(card).join('')}</div></section>`;
   }).join('')}</div>`;
@@ -383,6 +389,13 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (selected) { selected = null; render(); } else if (activityOpen()) { setActivity(false); $('activity-toggle').focus(); }
 });
+$('stats').onclick = (e) => {
+  if (!e.target.closest('#done-toggle')) return;
+  doneHidden = !doneHidden;
+  store.set('sf.hideDone', doneHidden ? '1' : '0');
+  render();
+  $('done-toggle').focus();
+};
 $('project').onchange = () => { store.set('sf.project', $('project').value); render(); };
 poll(); setInterval(poll, 3000);
 </script>
