@@ -609,6 +609,15 @@ function retargetPr(config, number, base) {
   run('gh', ['pr', 'edit', String(number), '--repo', config.repo.slug, '--base', base]);
 }
 
+// Rewrite an open PR/MR's title and description (a later round changed what the PR does).
+function updatePr(config, number, { title, bodyFile }) {
+  if (requireForge(config) === 'gitlab') {
+    glabWrite(config, 'PUT', `${glabProject(config)}/merge_requests/${number}`, { title, description: fs.readFileSync(bodyFile, 'utf8') });
+    return;
+  }
+  run('gh', ['pr', 'edit', String(number), '--repo', config.repo.slug, '--title', title, '--body-file', bodyFile]);
+}
+
 function commentOnPr(config, number, bodyFile) {
   if (requireForge(config) === 'gitlab') {
     glabWrite(config, 'POST', `${glabProject(config)}/merge_requests/${number}/notes`, { body: fs.readFileSync(bodyFile, 'utf8') });
@@ -662,6 +671,9 @@ function applyIdentity(config, stage) {
   const pushed = tryGit(stage.worktree, 'rev-parse', '--verify', '--quiet', `refs/remotes/${remote}/${stage.branch}`);
   const upstream = pushed ? `${remote}/${stage.branch}` : stage.baseSha;
   if (!upstream) return 0;
+  // A merge of the base branch into the stage branch puts other people's commits in this range, and replaying them
+  // would rewrite them. Such a range is left as it is; the merge itself is committed with the factory identity.
+  if (Number(tryGit(stage.worktree, 'rev-list', '--merges', '--count', `${upstream}..HEAD`) || 0) > 0) return 0;
   const authors = (tryGit(stage.worktree, 'log', '--format=%an%x00%ae%x00%cn%x00%ce', `${upstream}..HEAD`) || '').split('\n').filter(Boolean);
   const want = `${env.GIT_AUTHOR_NAME}\0${env.GIT_AUTHOR_EMAIL}`;
   if (authors.every((a) => a === `${want}\0${want}`)) return 0;
@@ -691,16 +703,25 @@ commands['stage:pr'] = ({ positional: [p, f, n], flags }) => {
   git(stage.worktree, 'push', '--quiet', '-u', ...(isStack(config) ? [`--force-with-lease=${stage.branch}`] : []), config.repo.remote, `HEAD:refs/heads/${stage.branch}`);
   stage.pushedSha = git(stage.worktree, 'rev-parse', 'HEAD');
   let pr = findOpenPr(config, stage.branch);
+  const parent = stage.parent != null ? getStage(state, stage.parent) : null;
+  const stackNote = parent?.pr ? `> **Stacked** on ${prRef(config, parent.pr.number)} (stage ${parent.n}). This targets that branch; merge it first.\n\n` : '';
+  const body = stackNote + fs.readFileSync(path.resolve(flags['body-file']), 'utf8');
+  const bodyFile = path.join(featureDir(p, f), 'stages', String(n), 'pr-body.md');
+  fs.mkdirSync(path.dirname(bodyFile), { recursive: true });
+  const sig = config.identity?.signature ? `\n\n---\n_${config.identity.signature}_` : '';
+  const composed = `${body.trim()}${sig}\n\n${PR_MARKER}\n`;
+  // The last body and title we sent. A reused PR is rewritten only when they changed, so a re-run with the
+  // same inputs never overwrites edits a human made to the description on the forge.
+  const sentFile = path.join(featureDir(p, f), 'stages', String(n), 'pr-body.sent.json');
+  const sent = fs.existsSync(sentFile) ? readJSON(sentFile) : null;
+  const previous = sent ?? (fs.existsSync(bodyFile) ? { body: fs.readFileSync(bodyFile, 'utf8'), title: null } : null);
+  fs.writeFileSync(bodyFile, composed);
   if (!pr) {
-    const parent = stage.parent != null ? getStage(state, stage.parent) : null;
-    const stackNote = parent?.pr ? `> **Stacked** on ${prRef(config, parent.pr.number)} (stage ${parent.n}). This targets that branch; merge it first.\n\n` : '';
-    const body = stackNote + fs.readFileSync(path.resolve(flags['body-file']), 'utf8');
-    const bodyFile = path.join(featureDir(p, f), 'stages', String(n), 'pr-body.md');
-    fs.mkdirSync(path.dirname(bodyFile), { recursive: true });
-    const sig = config.identity?.signature ? `\n\n---\n_${config.identity.signature}_` : '';
-    fs.writeFileSync(bodyFile, `${body.trim()}${sig}\n\n${PR_MARKER}\n`);
     pr = createPr(config, { branch: stage.branch, base: parent ? parent.branch : config.repo.baseBranch, title: flags.title, bodyFile, cwd: stage.worktree });
+  } else if (!previous || previous.body !== composed || (previous.title != null && previous.title !== flags.title)) {
+    updatePr(config, pr.number, { title: flags.title, bodyFile });
   }
+  fs.writeFileSync(sentFile, JSON.stringify({ title: flags.title, body: composed }, null, 2));
   const ref = prRef(config, pr.number);
   stage.pr = { number: pr.number, url: pr.url, ref, openedAt: stage.pr?.openedAt || now() };
   stage.status = 'pr_open';
