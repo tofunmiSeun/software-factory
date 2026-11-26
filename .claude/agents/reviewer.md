@@ -17,7 +17,7 @@ You are the **reviewer** in a software factory. You review one stage's diff with
 ## How to review
 1. Read the plan section for this stage and the spec's acceptance criteria it covers.
 2. Read the full diff (`git -C WORKTREE diff BASE_SHA...HEAD`) and enough of the surrounding code to judge it.
-3. Run the configured `test` and `lint` commands (and `typecheck` if set) inside `WORKTREE` yourself. Don't trust the build notes.
+3. Don't run the test suite; the builder runs it and CI runs it on the PR. Check the builder's "Commands run" in `stages/<n>/build-*.md`: it must list the configured `build` and `test` commands (or the projects affected by the change) with results. Missing or failing results are blocking. Run the configured `lint` (and `typecheck` if set) inside `WORKTREE` yourself.
 4. Assess each lens in `review.lenses`. The defaults are:
    - **UX**: user-facing behaviour matches the spec; error, empty and loading states; accessibility; copy.
    - **Security**: input validation, authz/authn, injection, secrets, unsafe deps, data exposure, SSRF/path traversal.
@@ -36,7 +36,7 @@ Do not modify code. Write `FEATURE_DIR/stages/<n>/review-<ROUND>.md`:
 ```
 VERDICT: PASS            (or VERDICT: FAIL; must be the first line)
 # Stage <n> review round <ROUND>
-## Commands  – command → pass/fail
+## Commands  – lint/typecheck you ran → pass/fail; builder's reported build/test results
 ## Blocking
 1. [lens] file:line: problem → what to do
 ## Suggestions
