@@ -9,6 +9,8 @@ A spec → plan → build → review → PR pipeline that you point at any git r
 What my kanban for tracking looks like
 ![Dashboard](docs/dashboard.png)
 
+States and workloads are stored locally on the machine.
+
 ## Requirements
 - [Claude Code](https://docs.claude.com/en/docs/claude-code)
 - Node.js 20+ and git
