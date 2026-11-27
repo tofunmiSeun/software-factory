@@ -1,19 +1,12 @@
 # Software Factory
 
-A spec → plan → build → review → PR pipeline that you point at any git repository. **Claude Code is the orchestrator.** Four subagents do the work, you approve at fixed gates, and every change arrives as a reviewed pull request on the target repo.
+A spec → plan → build → review → PR pipeline that you point at any git repository, orchestrated by Claude Code.
 
-```
-You: issue ─► spec-builder ─► YOU approve spec ─► work-planner ─► YOU approve stages
-                   ▲ feedback ┘                        ▲ feedback ┘
-   ┌───────────────────────────────────────────────────────────────┘
-   ▼  for each stage (in its own git worktree, branched from the latest base)
- builder ⇄ reviewer   (UX · security · readability · simplicity; max 3 rounds → needs you)
-   ▼
- PR opened ─► YOU review & merge ─► (PR comments go back to the builder)
-   ▼ merged
- next stage … until done
-```
+<img width="787" height="657" alt="Screenshot 2026-11-27 at 00 09 37" src="https://github.com/user-attachments/assets/9db5a20b-eaca-4fca-933f-dc28b73adea3" />
 
+
+
+What my kanban for tracking looks like
 ![Dashboard](docs/dashboard.png)
 
 ## Requirements
